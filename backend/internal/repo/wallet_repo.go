@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/kleinai/backend/internal/model"
 )
@@ -329,12 +330,68 @@ func (r *WalletRepo) ListAdminLogs(ctx context.Context, f AdminWalletLogFilter) 
 	return rows, total, err
 }
 
+// AdminWalletSummary 「充值消费记录」全局汇总。
+// 注意：recharge 实际包含管理员手动加点 + cdk 等所有正向积分；这里口径与 wallet_log.biz_type 对齐：
+//   - recharge      正向，管理员充值（含创建时赠送）
+//   - cdk           正向，兑换码
+//   - promo         正向，优惠码兑换/邀请奖励等
+//   - invite_reward 正向，邀请奖励
+//   - gift          正向，运营赠送
+//   - refund        正向，调用失败退款
+//   - consume       负向，生成扣费
+//   - admin_deduct  负向，管理员扣减
+//
+// 汇总卡片把这些归到 3 个口径：recharge（除 refund 外的所有正向）/ consume（所有负向）/ refund。
+type AdminWalletSummary struct {
+	RechargeToday int64
+	RechargeTotal int64
+	ConsumeToday  int64
+	ConsumeTotal  int64
+	RefundToday   int64
+	RefundTotal   int64
+	RecordsToday  int64
+	RecordsTotal  int64
+	UsersTouched  int64
+}
+
+func (r *WalletRepo) AdminSummary(ctx context.Context) (*AdminWalletSummary, error) {
+	now := time.Now()
+	startToday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	endToday := startToday.Add(24 * time.Hour)
+
+	// 一条 SQL 算完，避免 7 个 round-trip。CASE 内用 ABS(points)，方向已经在 biz_type
+	// 之外用 direction 做兜底（极端情况：某 biz_type 也写过负向值）。
+	const sumSQL = `SELECT
+  COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? AND direction > 0 AND biz_type <> 'refund' THEN ABS(points) ELSE 0 END), 0) AS recharge_today,
+  COALESCE(SUM(CASE WHEN direction > 0 AND biz_type <> 'refund' THEN ABS(points) ELSE 0 END), 0) AS recharge_total,
+  COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? AND direction < 0 THEN ABS(points) ELSE 0 END), 0) AS consume_today,
+  COALESCE(SUM(CASE WHEN direction < 0 THEN ABS(points) ELSE 0 END), 0) AS consume_total,
+  COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? AND biz_type = 'refund' THEN ABS(points) ELSE 0 END), 0) AS refund_today,
+  COALESCE(SUM(CASE WHEN biz_type = 'refund' THEN ABS(points) ELSE 0 END), 0) AS refund_total,
+  COUNT(CASE WHEN created_at >= ? AND created_at < ? THEN 1 END) AS records_today,
+  COUNT(1) AS records_total,
+  COUNT(DISTINCT user_id) AS users_touched
+FROM wallet_log`
+
+	var s AdminWalletSummary
+	if err := r.db.WithContext(ctx).Raw(
+		sumSQL,
+		startToday, endToday,
+		startToday, endToday,
+		startToday, endToday,
+		startToday, endToday,
+	).Scan(&s).Error; err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
 // === helpers ===
 
 // lockUser SELECT ... FOR UPDATE。
 func lockUser(tx *gorm.DB, userID uint64) (*model.User, error) {
 	var u model.User
-	if err := tx.Set("gorm:query_option", "FOR UPDATE").
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where("id = ?", userID).First(&u).Error; err != nil {
 		return nil, err
 	}

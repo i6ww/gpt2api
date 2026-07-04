@@ -37,6 +37,7 @@ export default function App() {
             <Route path="/create/image" element={<CreateStudioPage />} />
             <Route path="/create/text" element={<CreateStudioPage />} />
             <Route path="/create/video" element={<CreateStudioPage />} />
+            <Route path="/create/music" element={<CreateStudioPage />} />
             <Route path="/docs" element={<DocsPage />} />
 
             {/* 受保护：未登录将弹浮层并退回首页 */}

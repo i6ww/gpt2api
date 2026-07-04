@@ -1,10 +1,21 @@
 import { useQuery } from '@tanstack/react-query';
 import { RefreshCw, Search, Wallet } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { billingApi } from '../../lib/services';
 import type { AdminWalletLogItem } from '../../lib/types';
 import { fmtNumber, fmtPoints, fmtTime } from '../../lib/format';
+import {
+  PageHeader,
+  PageShell,
+  Pager,
+  Section,
+  Stat as StatCard,
+  StatRow,
+  Toolbar,
+  ToolbarSpacer,
+} from '../../components/layout/PageShell';
+import { usePageSize } from '../../stores/uiPrefs';
 
 const BIZ_OPTIONS = [
   { value: '', label: '全部业务' },
@@ -23,7 +34,8 @@ export default function BillingPage() {
   const [bizType, setBizType] = useState('');
   const [direction, setDirection] = useState<'' | '1' | '-1'>('');
   const [page, setPage] = useState(1);
-  const pageSize = 20;
+  const [pageSize, setPageSize, sizeOptions] = usePageSize();
+  useEffect(() => setPage(1), [pageSize]);
 
   const query = useQuery({
     queryKey: ['admin', 'billing', 'wallet-logs', keyword, userID, bizType, direction, page],
@@ -31,70 +43,145 @@ export default function BillingPage() {
       keyword: keyword.trim() || undefined,
       user_id: Number(userID) || undefined,
       biz_type: bizType || undefined,
-      direction: direction ? Number(direction) as 1 | -1 : '',
+      // direction 必须是 undefined 而不是 ''，否则会序列化成 ?direction= 让
+      // 后端 *int + oneof 校验 400，整张表变空（共 0 条）。
+      direction: direction ? (Number(direction) as 1 | -1) : undefined,
       page,
       page_size: pageSize,
     }),
   });
+  // 顶部 stat 卡片走单独的 summary 接口，不受筛选/分页影响——之前是只在当前页 rows
+  // 上累加，导致管理员一眼以为「就只赚了这几条的钱」。
+  const summaryQ = useQuery({
+    queryKey: ['admin', 'billing', 'wallet-logs', 'summary'],
+    queryFn: () => billingApi.walletSummary(),
+    refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
+  });
 
   const rows = query.data?.list ?? [];
   const total = query.data?.total ?? 0;
-  const pages = Math.max(1, Math.ceil(total / pageSize));
-  const summary = useMemo(() => {
-    let income = 0;
-    let outcome = 0;
-    for (const row of rows) {
-      if (row.direction > 0) income += row.points;
-      if (row.direction < 0) outcome += Math.abs(row.points);
-    }
-    return { income, outcome };
-  }, [rows]);
+  const summary = summaryQ.data;
+
+  const refreshAll = () => { query.refetch(); summaryQ.refetch(); };
 
   return (
-    <div className="page page-wide space-y-4">
-      <header className="page-header">
-        <div>
-          <h1 className="page-title flex items-center gap-2"><Wallet className="text-klein-500" size={26} />充值消费记录</h1>
-          <p className="page-subtitle">查看用户积分流水，包含充值、消费、退款、兑换码、优惠码和人工调整。</p>
-        </div>
-        <button className="btn btn-outline btn-md" onClick={() => query.refetch()} disabled={query.isFetching}>
-          <RefreshCw size={16} className={query.isFetching ? 'animate-spin' : ''} /> 刷新
-        </button>
-      </header>
+    <PageShell>
+      <PageHeader
+        icon={<Wallet size={16} />}
+        title="充值消费记录"
+        right={
+          <button className="btn btn-outline btn-sm" onClick={refreshAll} disabled={query.isFetching || summaryQ.isFetching}>
+            <RefreshCw size={14} className={(query.isFetching || summaryQ.isFetching) ? 'animate-spin' : ''} /> 刷新
+          </button>
+        }
+      />
 
-      <div className="grid gap-3 md:grid-cols-3">
-        <Stat title="当前页收入" value={fmtPoints(summary.income)} />
-        <Stat title="当前页支出" value={fmtPoints(summary.outcome)} />
-        <Stat title="匹配记录" value={fmtNumber(total)} />
-      </div>
+      <StatRow cols={4}>
+        <StatCard
+          label="今日充值"
+          value={fmtPoints(summary?.recharge_today ?? 0)}
+          hint={`累计 ${fmtPoints(summary?.recharge_total ?? 0)}`}
+          tone="text-success"
+        />
+        <StatCard
+          label="今日消费"
+          value={fmtPoints(summary?.consume_today ?? 0)}
+          hint={`累计 ${fmtPoints(summary?.consume_total ?? 0)}`}
+          tone="text-danger"
+        />
+        <StatCard
+          label="今日退款"
+          value={fmtPoints(summary?.refund_today ?? 0)}
+          hint={`累计 ${fmtPoints(summary?.refund_total ?? 0)}`}
+          tone="text-warn"
+        />
+        <StatCard
+          label="今日净流入"
+          value={fmtPoints(summary?.net_today ?? 0)}
+          hint={`累计 ${fmtPoints(summary?.net_total ?? 0)} · 流水 ${fmtNumber(summary?.records_total ?? 0)}`}
+        />
+      </StatRow>
 
-      <div className="card card-section grid gap-2 !py-3 lg:grid-cols-[minmax(320px,1fr)_140px_140px_120px]">
-        <div className="relative min-w-0">
-          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary" />
+      <Toolbar>
+        <div className="relative min-w-[260px] flex-1">
+          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-tertiary" />
           <input
-            className="input pl-9"
+            className="input input-sm pl-7"
             value={keyword}
             onChange={(e) => { setKeyword(e.target.value); setPage(1); }}
-            placeholder="搜索流水ID、用户、业务ID、备注"
+            placeholder="搜索流水 ID / 用户 / 业务 ID / 备注"
           />
         </div>
         <input
-          className="input w-full"
+          className="input input-sm w-28"
           value={userID}
           onChange={(e) => { setUserID(e.target.value); setPage(1); }}
           placeholder="用户ID"
         />
-        <select className="select select-sm w-full" value={bizType} onChange={(e) => { setBizType(e.target.value); setPage(1); }}>
+        <select
+          className="select select-sm"
+          value={bizType}
+          onChange={(e) => { setBizType(e.target.value); setPage(1); }}
+        >
           {BIZ_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
-        <select className="select select-sm w-full" value={direction} onChange={(e) => { setDirection(e.target.value as typeof direction); setPage(1); }}>
-          <option value="">收支方向</option>
+        <select
+          className="select select-sm"
+          value={direction}
+          onChange={(e) => { setDirection(e.target.value as typeof direction); setPage(1); }}
+        >
+          <option value="">全部方向</option>
           <option value="1">收入</option>
           <option value="-1">支出</option>
         </select>
+        <ToolbarSpacer />
+        <span className="text-tiny text-text-tertiary whitespace-nowrap">共 {fmtNumber(total)} 条</span>
+      </Toolbar>
+
+      <div className="space-y-3 md:hidden">
+        {query.isLoading && (
+          <div className="rounded-xl border border-border bg-surface-1 px-3 py-10 text-center text-text-tertiary">加载中...</div>
+        )}
+        {!query.isLoading && rows.length === 0 && (
+          <div className="rounded-xl border border-border bg-surface-1 px-3 py-10 text-center text-text-tertiary">暂无记录</div>
+        )}
+        {rows.map((row) => {
+          const isIncome = row.direction > 0;
+          return (
+            <div key={row.id} className="rounded-xl border border-border bg-surface-1 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate font-medium text-text-primary">{row.user_label || `用户 ${row.user_id}`}</div>
+                  <div className="mt-1 text-tiny text-text-tertiary">{fmtTime(row.created_at)} · {bizLabel(row.biz_type)}</div>
+                </div>
+                <span className={isIncome ? 'badge badge-success' : 'badge badge-danger'}>
+                  {isIncome ? '收入' : '支出'}
+                </span>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2 text-tiny">
+                <div className="rounded-lg bg-surface-2 px-2 py-1.5">
+                  <div className="text-text-tertiary">变动</div>
+                  <div className={isIncome ? 'text-success font-semibold' : 'text-danger font-semibold'}>
+                    {isIncome ? '+' : '-'}{fmtPoints(Math.abs(row.points))}
+                  </div>
+                </div>
+                <div className="rounded-lg bg-surface-2 px-2 py-1.5">
+                  <div className="text-text-tertiary">前后</div>
+                  <div className="text-text-secondary">{fmtPoints(row.points_before)} → {fmtPoints(row.points_after)}</div>
+                </div>
+                <div className="rounded-lg bg-surface-2 px-2 py-1.5 col-span-2">
+                  <div className="text-text-tertiary">备注</div>
+                  <div className="truncate text-text-secondary">{row.remark || '-'}</div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
       </div>
 
-      <div className="card table-wrap">
+      <Section bodyClass="p-0">
+      <div className="hidden table-wrap md:block">
         <table className="data-table min-w-[1120px]">
           <thead>
             <tr>
@@ -117,15 +204,16 @@ export default function BillingPage() {
           </tbody>
         </table>
       </div>
-
-      <div className="card card-section flex flex-wrap items-center justify-between gap-3 !py-2">
-        <span className="text-small text-text-tertiary">第 {page} / {pages} 页，共 {fmtNumber(total)} 条</span>
-        <div className="flex gap-2">
-          <button className="btn btn-outline btn-sm" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>上一页</button>
-          <button className="btn btn-outline btn-sm" disabled={page >= pages} onClick={() => setPage((p) => p + 1)}>下一页</button>
-        </div>
-      </div>
-    </div>
+      <Pager
+        total={total}
+        page={page}
+        pageSize={pageSize}
+        onChange={setPage}
+        onPageSizeChange={setPageSize}
+        sizeOptions={sizeOptions}
+      />
+      </Section>
+    </PageShell>
   );
 }
 
@@ -148,15 +236,6 @@ function LogRow({ row }: { row: AdminWalletLogItem }) {
       <td className="tabular-nums">{fmtPoints(row.points_after)}</td>
       <td className="max-w-[240px] truncate" title={row.remark}>{row.remark || '-'}</td>
     </tr>
-  );
-}
-
-function Stat({ title, value }: { title: string; value: string }) {
-  return (
-    <section className="card card-section !py-3">
-      <div className="text-small text-text-tertiary">{title}</div>
-      <div className="mt-1 text-h3 font-semibold text-text-primary tabular-nums">{value}</div>
-    </section>
   );
 }
 

@@ -19,10 +19,18 @@ import (
 type AdminUserService struct {
 	users  *repo.UserRepo
 	wallet *repo.WalletRepo
+	invite *InviteService
 }
 
 func NewAdminUserService(users *repo.UserRepo, wallet *repo.WalletRepo) *AdminUserService {
 	return &AdminUserService{users: users, wallet: wallet}
+}
+
+// SetInviteService 注入邀请服务（可选；nil 时跳过返佣）。
+func (s *AdminUserService) SetInviteService(inv *InviteService) {
+	if s != nil {
+		s.invite = inv
+	}
 }
 
 func (s *AdminUserService) List(ctx context.Context, req *dto.AdminUserListReq) ([]*dto.AdminUserResp, int64, error) {
@@ -85,11 +93,15 @@ func (s *AdminUserService) Create(ctx context.Context, req *dto.AdminUserCreateR
 		return nil, wrapDup(err)
 	}
 	if req.Points > 0 && s.wallet != nil {
-		if _, err := s.wallet.Adjust(ctx, u.ID, model.BizRecharge, adminBizID("create"), req.Points, "管理员创建用户赠送", true); err != nil {
+		log, err := s.wallet.Adjust(ctx, u.ID, model.BizRecharge, adminBizID("create"), req.Points, "管理员创建用户赠送", true)
+		if err != nil {
 			return nil, errcode.DBError.Wrap(err)
 		}
 		u.Points = req.Points
 		u.TotalRecharge = req.Points
+		if s.invite != nil && log != nil {
+			s.invite.OnRecharge(ctx, u.ID, log.ID, req.Points)
+		}
 	}
 	return u, nil
 }
@@ -188,6 +200,10 @@ func (s *AdminUserService) AdjustPoints(ctx context.Context, id uint64, req *dto
 			return nil, errcode.InvalidParam.WithMsg("用户可用积分不足")
 		}
 		return nil, errcode.DBError.Wrap(err)
+	}
+	// 仅对真实"充值"（addTotal=true & 正向）触发邀请返佣；deduct 不返佣。
+	if addTotal && points > 0 && s.invite != nil && log != nil {
+		s.invite.OnRecharge(ctx, id, log.ID, points)
 	}
 	return &dto.AdminUserAdjustPointsResp{PointsBefore: log.PointsBefore, PointsAfter: log.PointsAfter}, nil
 }

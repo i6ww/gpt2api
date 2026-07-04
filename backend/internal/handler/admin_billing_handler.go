@@ -27,7 +27,7 @@ func (h *AdminBillingHandler) WalletLogs(c *gin.Context) {
 		Keyword:   req.Keyword,
 		UserID:    req.UserID,
 		BizType:   req.BizType,
-		Direction: req.Direction,
+		Direction: req.Direction(),
 		Page:      req.Page,
 		PageSize:  req.PageSize,
 	})
@@ -62,4 +62,26 @@ func (h *AdminBillingHandler) WalletLogs(c *gin.Context) {
 		pageSize = 20
 	}
 	response.Page(c, out, total, page, pageSize)
+}
+
+// WalletSummary 「充值消费记录」顶部 stat 卡片用的汇总。
+func (h *AdminBillingHandler) WalletSummary(c *gin.Context) {
+	s, err := h.wallet.AdminSummary(c.Request.Context())
+	if err != nil {
+		response.Fail(c, errcode.DBError.Wrap(err))
+		return
+	}
+	response.OK(c, &dto.AdminWalletLogSummaryResp{
+		RechargeToday: s.RechargeToday,
+		RechargeTotal: s.RechargeTotal,
+		ConsumeToday:  s.ConsumeToday,
+		ConsumeTotal:  s.ConsumeTotal,
+		RefundToday:   s.RefundToday,
+		RefundTotal:   s.RefundTotal,
+		NetToday:      s.RechargeToday + s.RefundToday - s.ConsumeToday,
+		NetTotal:      s.RechargeTotal + s.RefundTotal - s.ConsumeTotal,
+		RecordsToday:  s.RecordsToday,
+		RecordsTotal:  s.RecordsTotal,
+		UsersTouched:  s.UsersTouched,
+	})
 }

@@ -1,11 +1,11 @@
-// Package dto 入参 / 出参 DTO。
+﻿// Package dto 入参 / 出参 DTO。
 package dto
 
 // AccountCreateReq 创建账号。credential 为明文（api_key / cookie / 或 OAuth 仅 RT 时的唯一字段）。
 // OAuth（GPT）推荐与 sora2ok 一致：access_token（AT）+ refresh_token（RT）+ session_token（ST，可选）+ client_id（可选）；
 // 仍可只填 credential 作为仅 RT 的旧版表单。
 type AccountCreateReq struct {
-	Provider     string  `json:"provider"      binding:"required,oneof=gpt grok"`
+	Provider     string  `json:"provider"      binding:"required,oneof=gpt grok pic2api"`
 	Name         string  `json:"name"          binding:"required,min=1,max=128"`
 	AuthType     string  `json:"auth_type"     binding:"required,oneof=api_key cookie oauth"`
 	Credential   string  `json:"credential"    binding:"omitempty"`
@@ -15,7 +15,7 @@ type AccountCreateReq struct {
 	ClientID     string  `json:"client_id"     binding:"omitempty,max=128"`
 	BaseURL      string  `json:"base_url"      binding:"omitempty,url"`
 	ProxyID      *uint64 `json:"proxy_id"      binding:"omitempty"`
-	Weight       int     `json:"weight"        binding:"omitempty,min=1,max=1000"`
+	Weight       int     `json:"weight"        binding:"omitempty,min=1,max=10000"`
 	RPMLimit     int     `json:"rpm_limit"     binding:"omitempty,min=0"`
 	TPMLimit     int     `json:"tpm_limit"     binding:"omitempty,min=0"`
 	DailyQuota   int     `json:"daily_quota"   binding:"omitempty,min=0"`
@@ -34,7 +34,7 @@ type AccountUpdateReq struct {
 	ClientID     *string `json:"client_id"     binding:"omitempty,max=128"`
 	BaseURL      *string `json:"base_url"      binding:"omitempty,url"`
 	ProxyID      *uint64 `json:"proxy_id"      binding:"omitempty"`
-	Weight       *int    `json:"weight"        binding:"omitempty,min=1,max=1000"`
+	Weight       *int    `json:"weight"        binding:"omitempty,min=1,max=10000"`
 	RPMLimit     *int    `json:"rpm_limit"     binding:"omitempty,min=0"`
 	TPMLimit     *int    `json:"tpm_limit"     binding:"omitempty,min=0"`
 	DailyQuota   *int    `json:"daily_quota"   binding:"omitempty,min=0"`
@@ -57,12 +57,12 @@ type AccountUpdateReq struct {
 // 单次请求 accounts 建议 ≤500 条，大块导入请前端分批 POST。
 type AccountBatchImportReq struct {
 	Format   string `json:"format"    binding:"omitempty,oneof=lines sub2api"`
-	Provider string `json:"provider"  binding:"required,oneof=gpt grok"`
+	Provider string `json:"provider"  binding:"required,oneof=gpt grok pic2api"`
 	// lines 模式必填；sub2api 可省略（由每条 account.type / platform 推导）
 	AuthType string  `json:"auth_type" binding:"omitempty,oneof=api_key cookie oauth"`
 	BaseURL  string  `json:"base_url"  binding:"omitempty,url"`
 	ProxyID  *uint64 `json:"proxy_id" binding:"omitempty"`
-	Weight   int     `json:"weight"    binding:"omitempty,min=1,max=1000"`
+	Weight   int     `json:"weight"    binding:"omitempty,min=1,max=10000"`
 	// lines 模式：多行文本
 	Text string `json:"text"`
 	// sub2api 模式：解析后的账号切片
@@ -83,9 +83,6 @@ type Sub2APIAccountItem struct {
 type BatchImportResult struct {
 	Imported int `json:"imported"`
 	Skipped  int `json:"skipped"`
-	Detected int `json:"detected,omitempty"`
-	Pending  int `json:"pending,omitempty"`
-	Failed   int `json:"failed,omitempty"`
 }
 
 // Sub2APICreds sub2api credentials 对象。
@@ -111,6 +108,11 @@ type AccountTestResp struct {
 	ImageQuotaRemaining int    `json:"image_quota_remaining,omitempty"`
 	ImageQuotaTotal     int    `json:"image_quota_total,omitempty"`
 	ImageQuotaResetAt   int64  `json:"image_quota_reset_at,omitempty"`
+	SupportedModels     []string `json:"supported_models,omitempty"`
+}
+
+type AccountModelsResp struct {
+	SupportedModels []string `json:"supported_models"`
 }
 
 // AccountRefreshResp OAuth RT 刷新结果。
@@ -144,12 +146,13 @@ type AccountBatchRefreshResp struct {
 }
 
 type AccountListReq struct {
-	Provider string `form:"provider"  binding:"omitempty,oneof=gpt grok"`
-	Status   *int8  `form:"status"`
+	Provider string `form:"provider"  binding:"omitempty,oneof=gpt grok pic2api"`
 	PlanType string `form:"plan_type" binding:"omitempty,oneof=basic super heavy"`
+	AuthType string `form:"auth_type" binding:"omitempty,oneof=api_key cookie oauth token"`
+	Status   *int8  `form:"status"`
 	Keyword  string `form:"keyword"   binding:"omitempty,max=64"`
 	Page     int    `form:"page"      binding:"omitempty,min=1"`
-	PageSize int    `form:"page_size" binding:"omitempty,min=1,max=1000"`
+	PageSize int    `form:"page_size" binding:"omitempty,min=1,max=10000"`
 }
 
 // AccountResp 输出，已脱敏 credential。
@@ -186,6 +189,7 @@ type AccountResp struct {
 	ImageQuotaRemaining int    `json:"image_quota_remaining,omitempty"`
 	ImageQuotaTotal     int    `json:"image_quota_total,omitempty"`
 	ImageQuotaResetAt   int64  `json:"image_quota_reset_at,omitempty"`
+	SupportedModels     []string `json:"supported_models,omitempty"`
 	CreatedAt           int64  `json:"created_at"`
 	UpdatedAt           int64  `json:"updated_at"`
 }
@@ -200,26 +204,14 @@ type AccountBatchDeleteReq struct {
 // all：当前列表中未软删的全部账号；须 confirm=DELETE_ALL_ACCOUNTS。
 type AccountPurgeReq struct {
 	Scope    string `json:"scope" binding:"required,oneof=all invalid zero_quota"`
-	Provider string `json:"provider" binding:"omitempty,oneof=gpt grok"`
+	Provider string `json:"provider" binding:"omitempty,oneof=gpt grok pic2api"`
+	AuthType string `json:"auth_type" binding:"omitempty,oneof=api_key cookie oauth token"`
 	Confirm  string `json:"confirm"`
 }
 
 // AccountBulkOpResult 批量删除结果。
 type AccountBulkOpResult struct {
 	Deleted int64 `json:"deleted"`
-}
-
-// AccountBatchAssignProxyReq 批量设置账号代理。
-type AccountBatchAssignProxyReq struct {
-	Mode       string   `json:"mode"        binding:"required,oneof=single cycle"`
-	AccountIDs []uint64 `json:"account_ids" binding:"required,min=1,max=2000,dive,min=1"`
-	ProxyID    *uint64  `json:"proxy_id"`
-	ProxyIDs   []uint64 `json:"proxy_ids"`
-}
-
-// AccountBatchAssignProxyResp 批量设置账号代理结果。
-type AccountBatchAssignProxyResp struct {
-	Updated int `json:"updated"`
 }
 
 // AccountSecretsResp 仅管理员可见，返回单个账号的明文凭证。

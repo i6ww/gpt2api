@@ -1,0 +1,260 @@
+# =====================================================
+# KleinAI · 主控生产单机栈（Caddy + 自动 LE 续期）
+#
+# 与 docker-compose.yml 的差别：
+#   - 用 caddy 取代 nginx 做 TLS 终结，自动 ACME 申请 + 续期；
+#   - 全部服务走 internal expose，对外只开放 80/443；
+#   - 默认开 cluster + embedded agent，配合 cluster 节点扩容；
+#   - 所有 secret 走 .env.prod（开机用 scripts/bootstrap-server.sh 生成）。
+#
+# 启动：
+#   cd /opt/klein/src/deploy
+#   docker compose -f docker-compose.prod.yml --env-file /opt/klein/env/.env.prod up -d --build
+#
+# 滚更新：
+#   cd /opt/klein/src && git pull --ff-only
+#   cd deploy && docker compose -f docker-compose.prod.yml --env-file /opt/klein/env/.env.prod \
+#     build api admin openai worker user-web admin-web
+#   docker compose -f docker-compose.prod.yml --env-file /opt/klein/env/.env.prod \
+#     up -d --no-deps api admin openai worker user-web admin-web
+# =====================================================
+
+x-common-env: &common-env
+  KLEIN_ENV: ${KLEIN_ENV:-prod}
+  KLEIN_DB_DSN: ${KLEIN_DB_DSN}
+  KLEIN_REDIS_ADDR: ${KLEIN_REDIS_ADDR:-redis:6379}
+  KLEIN_REDIS_PASSWORD: ${KLEIN_REDIS_PASSWORD:-}
+  KLEIN_JWT_SECRET: ${KLEIN_JWT_SECRET}
+  KLEIN_JWT_REFRESH_SECRET: ${KLEIN_JWT_REFRESH_SECRET}
+  KLEIN_JWT_ACCESS_TTL: ${KLEIN_JWT_ACCESS_TTL:-2h}
+  KLEIN_JWT_REFRESH_TTL: ${KLEIN_JWT_REFRESH_TTL:-336h}
+  KLEIN_AES_KEY: ${KLEIN_AES_KEY}
+  KLEIN_CLUSTER_BOOTSTRAP_SECRET: ${KLEIN_CLUSTER_BOOTSTRAP_SECRET}
+  KLEIN_DOWNLOAD_TICKET_SECRET: ${KLEIN_DOWNLOAD_TICKET_SECRET}
+  KLEIN_PUBLIC_BASE_URL: ${KLEIN_PUBLIC_BASE_URL:-https://gpt2api.com}
+  KLEIN_OPENAI_BASE: ${KLEIN_OPENAI_BASE:-https://api.openai.com}
+  KLEIN_GROK_BASE: ${KLEIN_GROK_BASE:-https://api.x.ai}
+  KLEIN_GPT_BASE_URL: ${KLEIN_GPT_BASE_URL:-https://api.openai.com}
+  KLEIN_GROK_BASE_URL: ${KLEIN_GROK_BASE_URL:-https://grok.com}
+  KLEIN_XAI_BASE_URL: ${KLEIN_XAI_BASE_URL:-https://api.x.ai/v1}
+  KLEIN_PIC2API_BASE_URL: ${KLEIN_PIC2API_BASE_URL:-https://pic2api.com}
+  KLEIN_PROVIDER_GPT: ${KLEIN_PROVIDER_GPT:-real}
+  KLEIN_PROVIDER_GROK: ${KLEIN_PROVIDER_GROK:-real}
+  KLEIN_PROVIDER_XAI: ${KLEIN_PROVIDER_XAI:-real}
+  KLEIN_PROVIDER_ADOBE: ${KLEIN_PROVIDER_ADOBE:-real}
+  KLEIN_PROVIDER_PIC2API: ${KLEIN_PROVIDER_PIC2API:-real}
+  # FlowMusic（歌曲）渠道：默认值即上游公开参数，单 cookie 即可生成；
+  # 若 Google 返回 client_secret missing，再补 CLIENT_SECRET 走自动续期。
+  KLEIN_PROVIDER_FLOWMUSIC: ${KLEIN_PROVIDER_FLOWMUSIC:-real}
+  KLEIN_FLOWMUSIC_BASE_URL: ${KLEIN_FLOWMUSIC_BASE_URL:-https://www.flowmusic.app}
+  KLEIN_FLOWMUSIC_SUPABASE_BASE_URL: ${KLEIN_FLOWMUSIC_SUPABASE_BASE_URL:-https://sb.flowmusic.app}
+  KLEIN_FLOWMUSIC_SUPABASE_ANON_KEY: ${KLEIN_FLOWMUSIC_SUPABASE_ANON_KEY:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVkbmpjY3FjbWJ4ZWF4YmlkaW5yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE1NjEwNjQsImV4cCI6MjA4NzEzNzA2NH0.XCXSuL7Th1xHecfRrP0vAOFmKwJxwBqVFLu06SxtVzg}
+  KLEIN_FLOWMUSIC_GOOGLE_OAUTH_TOKEN_URL: ${KLEIN_FLOWMUSIC_GOOGLE_OAUTH_TOKEN_URL:-https://oauth2.googleapis.com/token}
+  KLEIN_FLOWMUSIC_GOOGLE_OAUTH_CLIENT_ID: ${KLEIN_FLOWMUSIC_GOOGLE_OAUTH_CLIENT_ID:-1032626174130-533micbc9tgsei76mqhtguq07lpoe4je.apps.googleusercontent.com}
+  KLEIN_FLOWMUSIC_GOOGLE_OAUTH_CLIENT_SECRET: ${KLEIN_FLOWMUSIC_GOOGLE_OAUTH_CLIENT_SECRET:-}
+  KLEIN_GROK_CF_STATE_PATH: /app/storage/grok_cf.json
+  KLEIN_GROK_UPLOAD_NORMALIZE_JPEG: 'true'
+  KLEIN_GROK_DYNAMIC_STATSIG: 'true'
+  # x-statsig-id 方案开关：true=70 字节签名 token；false=grok2api 简化方案 base64("x1:TypeError…")。
+  KLEIN_GROK_STATSIG_SIGNED: ${KLEIN_GROK_STATSIG_SIGNED:-true}
+  KLEIN_CORS_ORIGINS: ${KLEIN_CORS_ORIGINS}
+  KLEIN_LOG_LEVEL: ${KLEIN_LOG_LEVEL:-info}
+  KLEIN_LOG_DIR: /app/logs
+  KLEIN_MYSQL_MAX_OPEN_CONNS: ${KLEIN_MYSQL_MAX_OPEN_CONNS:-70}
+  KLEIN_MYSQL_MAX_IDLE_CONNS: ${KLEIN_MYSQL_MAX_IDLE_CONNS:-20}
+  KLEIN_MYSQL_CONN_MAX_IDLE_TIME: ${KLEIN_MYSQL_CONN_MAX_IDLE_TIME:-10m}
+  KLEIN_RATELIMIT_APIKEY_PER_MINUTE: ${KLEIN_RATELIMIT_APIKEY_PER_MINUTE:-600}
+  TZ: ${TZ:-Asia/Shanghai}
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: klein-mysql
+    restart: always
+    command:
+      - --default-authentication-plugin=caching_sha2_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --innodb-buffer-pool-size=${KLEIN_MYSQL_BUFFER:-2G}
+      # 高并发：4 个后端进程各最多 150 连接(4×150=600)，留头寸到 700
+      - --max_connections=700
+      - --binlog-expire-logs-seconds=86400
+      - --max-binlog-size=64M
+      - --sql-mode=STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION
+      # sort/read buffer 默认 256K/128K，对 `generation_task` 这种含 mediumtext (prompt/params)
+      # 的表执行 `ORDER BY id ASC LIMIT 32 FOR UPDATE SKIP LOCKED` 时不够 → ClaimBatch
+      # 报 `Error 1038 Out of sort memory` → 调度死锁，所有 task 停在 pending。
+      # 给 4M / 1M 足够：单进程占用上限 ≈ max_connections × buffer，30×4M=120M 完全可控。
+      - --sort-buffer-size=4M
+      - --read-buffer-size=1M
+      - --read-rnd-buffer-size=2M
+    environment:
+      MYSQL_ROOT_PASSWORD: ${KLEIN_MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${KLEIN_MYSQL_DB:-klein_ai}
+      MYSQL_USER: ${KLEIN_MYSQL_USER:-klein}
+      MYSQL_PASSWORD: ${KLEIN_MYSQL_PASSWORD}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "127.0.0.1:${KLEIN_MYSQL_PORT:-13306}:3306"
+    volumes:
+      - klein-mysql-data:/var/lib/mysql
+      - ./mysql-init/01-run-migrations.sh:/docker-entrypoint-initdb.d/01-run-migrations.sh:ro
+      - ../backend/migrations:/migrations:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [klein]
+
+  redis:
+    image: redis:7-alpine
+    container_name: klein-redis
+    restart: always
+    command: redis-server --appendonly yes ${KLEIN_REDIS_PASSWORD:+--requirepass ${KLEIN_REDIS_PASSWORD}}
+    ports:
+      - "127.0.0.1:${KLEIN_REDIS_PORT:-16379}:6379"
+    volumes:
+      - klein-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    networks: [klein]
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: klein-flaresolverr
+    restart: always
+    environment:
+      LOG_LEVEL: info
+      TZ: ${TZ:-Asia/Shanghai}
+    networks: [klein]
+
+  api:
+    image: kleinai/backend:prod
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: klein-api
+    entrypoint: ["/app/api"]
+    restart: always
+    environment:
+      <<: *common-env
+      KLEIN_NODE_ID: 1
+    expose: ["17180"]
+    volumes:
+      - klein-logs:/app/logs
+      - klein-storage:/app/storage
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      flaresolverr: { condition: service_started }
+    networks: [klein]
+
+  admin:
+    image: kleinai/backend:prod
+    container_name: klein-admin
+    entrypoint: ["/app/admin"]
+    restart: always
+    environment:
+      <<: *common-env
+      KLEIN_NODE_ID: 2
+    expose: ["17188"]
+    volumes:
+      - klein-logs:/app/logs
+      - klein-storage:/app/storage
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    networks: [klein]
+
+  openai:
+    image: kleinai/backend:prod
+    container_name: klein-openai
+    entrypoint: ["/app/openai"]
+    restart: always
+    environment:
+      <<: *common-env
+      KLEIN_NODE_ID: 3
+    expose: ["17200"]
+    volumes:
+      - klein-logs:/app/logs
+      - klein-storage:/app/storage
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    networks: [klein]
+
+  worker:
+    image: kleinai/backend:prod
+    container_name: klein-worker
+    entrypoint: ["/app/worker"]
+    restart: always
+    environment:
+      <<: *common-env
+      KLEIN_NODE_ID: 4
+    volumes:
+      - klein-logs:/app/logs
+      - klein-storage:/app/storage
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      flaresolverr: { condition: service_started }
+    networks: [klein]
+
+  user-web:
+    image: kleinai/user-web:prod
+    build:
+      context: ../frontend
+      dockerfile: apps/user/Dockerfile
+    container_name: klein-user-web
+    restart: always
+    expose: ["80"]
+    depends_on: [api, openai]
+    networks: [klein]
+
+  admin-web:
+    image: kleinai/admin-web:prod
+    build:
+      context: ../frontend
+      dockerfile: apps/admin/Dockerfile
+    container_name: klein-admin-web
+    restart: always
+    expose: ["80"]
+    depends_on: [admin]
+    networks: [klein]
+
+  # Caddy 做对外 TLS 终结：
+  #   - 自动 ACME（Let's Encrypt）申请 + 续期，证书放在 caddy_data 卷里持久化；
+  #   - 续期由 caddy 内部 cron 完成（默认提前 30 天），不需要 cron / certbot；
+  #   - 80/443 对公网开放；HTTP -> HTTPS 自动跳转；
+  #   - Caddyfile 已写死 gpt2api.com / www.gpt2api.com / admin.gpt2api.com，
+  #     新增域名直接编辑 ./Caddyfile 然后 `docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile`。
+  caddy:
+    image: caddy:2-alpine
+    container_name: klein-caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - klein-caddy-data:/data
+      - klein-caddy-config:/config
+    depends_on: [user-web, admin-web, api, admin, openai]
+    networks: [klein]
+
+volumes:
+  klein-mysql-data:
+  klein-redis-data:
+  klein-logs:
+  klein-storage:
+  klein-caddy-data:
+  klein-caddy-config:
+
+networks:
+  klein:
+    name: klein-net

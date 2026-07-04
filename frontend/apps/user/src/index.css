@@ -4,8 +4,14 @@
 @tailwind components;
 @tailwind utilities;
 
-/* User app shell overrides. Keep the public app quiet and close to the
-   reference: white canvas, thin borders, soft controls, little decoration. */
+/* ===========================================================
+   User app shell · 用户端外观覆盖
+   设计哲学：白色画布 / 细线 / 软控件 / 少装饰；切到 dark 之后翻转成
+   暗背景 / 高对比文字 / 细描边。
+   实现方式：覆盖 @kleinai/theme 的 token 变量，不要在组件层硬写 hex —
+   一切走 var(--surface-1) / var(--text-primary) / var(--border-default)，
+   这样 [data-theme='dark'] 一切上就自动翻转。
+   =========================================================== */
 
 @layer base {
   :root {
@@ -15,19 +21,79 @@
     --surface-3: #eeeeef;
     --border-default: #e5e5e5;
     --border-strong: #d4d4d4;
+    --border-subtle: #ededed;
     --text-primary: #111111;
     --text-secondary: #525252;
     --text-tertiary: #8a8a8a;
+    --text-disabled: #c4c4c4;
     --klein-gradient: linear-gradient(135deg, #111111 0%, #333333 100%);
     --klein-gradient-soft: #f7f7f8;
     --klein-glow: none;
     --klein-glow-soft: none;
     --focus-ring: 0 0 0 3px rgba(17, 17, 17, .08);
+    --shadow-1: 0 1px 2px rgba(17, 17, 17, .04);
+    --shadow-2: 0 4px 16px rgba(17, 17, 17, .06);
+    --shadow-3: 0 18px 48px rgba(17, 17, 17, .08);
+    --shadow-4: 0 32px 80px rgba(17, 17, 17, .12);
+
+    /* 用户端 primary 走中性黑色 (Notion 风)，dark 模式下走亮灰 */
+    --user-primary-bg: #111111;
+    --user-primary-fg: #ffffff;
+    --user-primary-bg-hover: #2a2a2a;
+    --user-secondary-bg: #f5f5f5;
+    --user-secondary-bg-hover: #eeeeef;
+    --user-input-bg: #ffffff;
+    --user-input-placeholder: #9ca3af;
+    --user-dot-color: rgba(17, 17, 17, .34);
+    --user-dot-text: rgba(17, 17, 17, .72);
+    --user-dot-shadow: rgba(255, 255, 255, .8);
+    --user-dot-bg: #fafafa;
+  }
+
+  /* dark：保持「黑白克制」的克莱因极简感，不要直接套 @kleinai/theme
+     默认那种偏蓝的 IKB 风，否则用户端会跟 admin 撞脸。 */
+  [data-theme='dark'] {
+    --surface-bg: #0b0e14;
+    --surface-1: #11151c;
+    --surface-2: #161b24;
+    --surface-3: #1d2330;
+    --surface-overlay: rgba(0, 0, 0, .65);
+    --surface-glass: rgba(11, 14, 20, .65);
+    --border-default: rgba(255, 255, 255, .08);
+    --border-strong: rgba(255, 255, 255, .18);
+    --border-subtle: rgba(255, 255, 255, .04);
+    --text-primary: #f4f5f7;
+    --text-secondary: #b4b8c2;
+    --text-tertiary: #6b7180;
+    --text-disabled: rgba(180, 184, 194, .35);
+    --text-on-klein: #ffffff;
+    --klein-gradient: linear-gradient(135deg, #f4f5f7 0%, #b4b8c2 100%);
+    --klein-gradient-soft: rgba(244, 245, 247, .08);
+    --focus-ring: 0 0 0 3px rgba(244, 245, 247, .12);
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, .35);
+    --shadow-2: 0 4px 16px rgba(0, 0, 0, .45);
+    --shadow-3: 0 18px 48px rgba(0, 0, 0, .55);
+    --shadow-4: 0 32px 80px rgba(0, 0, 0, .65);
+
+    --user-primary-bg: #f4f5f7;
+    --user-primary-fg: #11151c;
+    --user-primary-bg-hover: #d9dbe1;
+    --user-secondary-bg: #1d2330;
+    --user-secondary-bg-hover: #262d3d;
+    --user-input-bg: #161b24;
+    --user-input-placeholder: rgba(180, 184, 194, .55);
+    --user-dot-color: rgba(244, 245, 247, .34);
+    --user-dot-text: rgba(244, 245, 247, .72);
+    --user-dot-shadow: rgba(0, 0, 0, .8);
+    --user-dot-bg: #161b24;
   }
 
   body {
-    background: #ffffff;
+    background: var(--surface-bg);
+    color: var(--text-primary);
     line-height: 1.5;
+    transition: background var(--duration-base) var(--ease-out),
+                color var(--duration-base) var(--ease-out);
   }
 }
 
@@ -47,9 +113,10 @@
   .card-glass,
   .card-tinted,
   .creative-pane {
-    border: 1px solid #e5e5e5;
+    border: 1px solid var(--border-default);
     border-radius: 24px;
-    background: #ffffff;
+    background: var(--surface-1);
+    color: var(--text-primary);
     box-shadow: none;
   }
 
@@ -64,53 +131,54 @@
 
   .btn-primary,
   .btn-klein {
-    background: #111111;
-    color: #ffffff;
-    border-color: #111111;
+    background: var(--user-primary-bg);
+    color: var(--user-primary-fg);
+    border-color: var(--user-primary-bg);
     box-shadow: none;
   }
 
   .btn-primary:hover:not(:disabled):not([aria-disabled='true']),
   .btn-klein:hover:not(:disabled):not([aria-disabled='true']) {
-    background: #2a2a2a;
-    border-color: #2a2a2a;
+    background: var(--user-primary-bg-hover);
+    border-color: var(--user-primary-bg-hover);
     box-shadow: none;
     filter: none;
   }
 
   .btn-secondary {
-    background: #f5f5f5;
-    color: #111111;
-    border-color: #e5e5e5;
+    background: var(--user-secondary-bg);
+    color: var(--text-primary);
+    border-color: var(--border-default);
   }
 
   .btn-secondary:hover:not(:disabled):not([aria-disabled='true']),
   .btn-outline:hover:not(:disabled):not([aria-disabled='true']) {
-    background: #eeeeef;
-    border-color: #d4d4d4;
-    color: #111111;
+    background: var(--user-secondary-bg-hover);
+    border-color: var(--border-strong);
+    color: var(--text-primary);
   }
 
   .input,
   .select,
   .textarea {
     border-radius: 18px;
-    border-color: #e5e5e5;
-    background: #ffffff;
+    border-color: var(--border-default);
+    background: var(--user-input-bg);
+    color: var(--text-primary);
     box-shadow: none;
   }
 
   .input::placeholder,
   .select::placeholder,
   .textarea::placeholder {
-    color: #9ca3af;
+    color: var(--user-input-placeholder);
     font-weight: 400;
   }
 
   .input:focus,
   .select:focus,
   .textarea:focus {
-    border-color: #e5e5e5;
+    border-color: var(--border-strong);
     box-shadow: none;
     outline: none;
   }
@@ -132,7 +200,7 @@
     inset: 0;
     overflow: hidden;
     border-radius: inherit;
-    background: #fafafa;
+    background: var(--user-dot-bg);
   }
 
   .generating-dots::before,
@@ -140,7 +208,7 @@
     content: '';
     position: absolute;
     inset: 7%;
-    background-image: radial-gradient(circle, rgba(17, 17, 17, .34) 1.45px, transparent 1.75px);
+    background-image: radial-gradient(circle, var(--user-dot-color) 1.45px, transparent 1.75px);
     background-size: 24px 24px;
     background-position: center;
     mask-image: radial-gradient(circle at 58% 48%, #000 0 34%, rgba(0, 0, 0, .68) 48%, transparent 72%);
@@ -169,17 +237,21 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    color: rgba(17, 17, 17, .72);
+    color: var(--user-dot-text);
     font-size: 14px;
     line-height: 1.4;
     letter-spacing: 0;
     text-align: center;
     white-space: nowrap;
-    text-shadow: 0 1px 0 rgba(255, 255, 255, .8);
+    text-shadow: 0 1px 0 var(--user-dot-shadow);
   }
 
   .generating-dots__phrase--active {
-    animation: generating-phrase-fade 1.8s ease-in-out;
+    /* 只做淡入，不做淡出：之前是 1.8s 内 fade-in/保持/fade-out 完整循环，
+       动画结束后元素会自动恢复默认 opacity=1，于是同一句话在 fade-out 之后
+       会"又冒出来一次"——视觉上像闪了两次。现在改成 400ms 淡入 + forwards
+       保持，等 JS 切到下一句时让 React 直接 unmount + 新的 span 淡入即可。 */
+    animation: generating-phrase-fade 420ms cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
   }
 }
 
@@ -210,17 +282,9 @@
     opacity: 0;
     transform: translateY(4px);
   }
-  18% {
-    opacity: 1;
-    transform: translateY(0);
-  }
-  82% {
-    opacity: 1;
-    transform: translateY(0);
-  }
   100% {
-    opacity: 0;
-    transform: translateY(-4px);
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 

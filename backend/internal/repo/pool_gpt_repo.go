@@ -108,9 +108,7 @@ func (r *PoolGptRepo) Create(ctx context.Context, p *model.PoolGpt) error {
 
 // UpsertMany 按 email upsert。
 //
-// 凡是导入提供的字段都会覆盖；DELETED 行 (deleted_at IS NOT NULL) 也会被
-// "复活" 为新行（DoUpdates 不会清 deleted_at；如果需要复活请先 RESTORE
-// 单接口）。
+// 凡是导入提供的字段都会覆盖；命中软删除行时会清空 deleted_at，让重新导入的账号恢复显示。
 func (r *PoolGptRepo) UpsertMany(ctx context.Context, items []*model.PoolGpt) (int64, error) {
 	if len(items) == 0 {
 		return 0, nil
@@ -121,7 +119,7 @@ func (r *PoolGptRepo) UpsertMany(ctx context.Context, items []*model.PoolGpt) (i
 			"password_enc", "access_token_enc", "refresh_token_enc",
 			"id_token_enc", "api_key_enc",
 			"oauth_issuer", "oauth_client_id", "status", "expires_at",
-			"plan_type", "chatgpt_account_id", "updated_at",
+			"plan_type", "chatgpt_account_id", "deleted_at", "updated_at",
 		}),
 	}).Create(&items)
 	return tx.RowsAffected, tx.Error
@@ -136,20 +134,20 @@ func (r *PoolGptRepo) Update(ctx context.Context, id uint64, fields map[string]a
 		Where("id = ?", id).Updates(fields).Error
 }
 
-// SoftDelete 软删除。
+// SoftDelete deletes the account row permanently.
 func (r *PoolGptRepo) SoftDelete(ctx context.Context, id uint64) error {
-	return r.db.WithContext(ctx).Model(&model.PoolGpt{}).
-		Where("id = ?", id).Update("deleted_at", time.Now().UTC()).Error
+	return r.db.WithContext(ctx).Unscoped().
+		Where("id = ?", id).Delete(&model.PoolGpt{}).Error
 }
 
-// SoftDeleteByIDs 批量软删除。
+// SoftDeleteByIDs permanently deletes account rows.
 func (r *PoolGptRepo) SoftDeleteByIDs(ctx context.Context, ids []uint64) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	tx := r.db.WithContext(ctx).Model(&model.PoolGpt{}).
-		Where("id IN ? AND deleted_at IS NULL", ids).
-		Update("deleted_at", time.Now().UTC())
+	tx := r.db.WithContext(ctx).Unscoped().
+		Where("id IN ?", ids).
+		Delete(&model.PoolGpt{})
 	return tx.RowsAffected, tx.Error
 }
 
@@ -201,8 +199,8 @@ type PoolGptRefreshScope string
 
 const (
 	PoolGptScopeAll        PoolGptRefreshScope = "all"
-	PoolGptScopeAbnormal   PoolGptRefreshScope = "abnormal"   // status != valid
-	PoolGptScopeExpiring   PoolGptRefreshScope = "expiring"   // < 12h
+	PoolGptScopeAbnormal   PoolGptRefreshScope = "abnormal"    // status != valid
+	PoolGptScopeExpiring   PoolGptRefreshScope = "expiring"    // < 12h
 	PoolGptScopeQuotaStale PoolGptRefreshScope = "quota_stale" // last_quota_check_at 久远 / NULL
 )
 
@@ -292,7 +290,7 @@ func (r *PoolGptRepo) AvailableForGateway(ctx context.Context) ([]*model.PoolGpt
 		Where("status = ?", model.GPTStatusValid).
 		Where("cooldown_until IS NULL OR cooldown_until <= ?", now).
 		Where("expires_at IS NULL OR expires_at > ?", now).
-		Order("id ASC").
+		Order("last_used_at IS NULL DESC, last_used_at ASC, id ASC").
 		Find(&items).Error
 	return items, err
 }
@@ -336,8 +334,7 @@ func (r *PoolGptRepo) MarkGatewayFailed(ctx context.Context, id uint64, reason s
 func (r *PoolGptRepo) PurgeBy(ctx context.Context, f PoolGptPurgeFilter) (int64, error) {
 	q := r.db.WithContext(ctx).Model(&model.PoolGpt{}).Where("deleted_at IS NULL")
 	if f.All {
-		// 全清，直接软删。
-		tx := q.Update("deleted_at", time.Now().UTC())
+		tx := q.Unscoped().Delete(&model.PoolGpt{})
 		return tx.RowsAffected, tx.Error
 	}
 	hit := false
@@ -360,6 +357,6 @@ func (r *PoolGptRepo) PurgeBy(ctx context.Context, f PoolGptPurgeFilter) (int64,
 	if !hit {
 		return 0, nil
 	}
-	tx := q.Update("deleted_at", time.Now().UTC())
+	tx := q.Unscoped().Delete(&model.PoolGpt{})
 	return tx.RowsAffected, tx.Error
 }

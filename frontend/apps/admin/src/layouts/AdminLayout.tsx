@@ -1,19 +1,20 @@
 import { FormEvent, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import {
+  Activity,
   BadgeDollarSign,
   ChevronDown,
-  Crown,
   FileText,
   Globe2,
   Inbox,
   Layers,
   LayoutDashboard,
+  LineChart,
   LockKeyhole,
   LogOut,
+  Megaphone,
   Menu,
   Network,
-  ReceiptText,
   Settings,
   Tag,
   Ticket,
@@ -31,7 +32,7 @@ import { authApi } from '../lib/services';
 import { useAuthStore } from '../stores/auth';
 import { toast } from '../stores/toast';
 
-const APP_VERSION = 'v2.0.3';
+const APP_VERSION = 'v3.0.1';
 
 type NavItem = { to: string; label: string; icon: typeof LayoutDashboard; end?: boolean };
 type NavGroup = { label: string; items: NavItem[] };
@@ -47,14 +48,16 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { to: '/pools', label: '号池管理', icon: Layers, end: true },
       { to: '/pools/register', label: '号池注册', icon: UserPlus },
-      { to: '/plus-pool', label: 'Plus 升级资源池', icon: Crown },
       { to: '/mail-pool', label: '邮箱池', icon: Inbox },
     ],
   },
   {
     label: '网关',
     items: [
-      { to: '/upstreams', label: '上游 API', icon: Globe2 },
+      // /upstreams 是上游账号（API key / cookie / token），/upstream-mgmt 是
+      // 通道 + 路由 + 利润报表。两个互补：一个管"用什么号"，一个管"怎么算成本"。
+      { to: '/upstreams', label: '上游账号', icon: Globe2 },
+      { to: '/upstream-mgmt', label: '上游 API 管理', icon: LineChart },
       { to: '/proxies', label: '代理管理', icon: Network },
     ],
   },
@@ -77,8 +80,10 @@ const NAV_GROUPS: NavGroup[] = [
   {
     label: '系统设置',
     items: [
+      { to: '/cluster', label: '集群节点', icon: Activity },
       { to: '/model-prices', label: '模型价格', icon: BadgeDollarSign },
-      { to: '/billing-settings', label: '扣费规则', icon: ReceiptText },
+      { to: '/announcements', label: '系统公告', icon: Megaphone },
+      // 「扣费规则」已并入「系统配置」第一张卡片，旧链接 /billing-settings 自动重定向。
       { to: '/config', label: '系统配置', icon: Settings },
     ],
   },
@@ -117,8 +122,8 @@ export function AdminLayout() {
 
       <aside
         className={clsx(
-          'flex-col border-r border-border bg-surface-1 lg:sticky lg:top-0 lg:flex lg:h-screen',
-          mobileOpen ? 'fixed inset-y-0 left-0 z-40 flex w-[86vw] max-w-[320px] shadow-3' : 'hidden',
+          'min-h-0 flex-col border-r border-border bg-surface-1 lg:sticky lg:top-0 lg:flex lg:h-screen',
+          mobileOpen ? 'fixed inset-y-0 left-0 z-40 flex h-[100dvh] max-h-[100dvh] w-[86vw] max-w-[320px] shadow-3' : 'hidden',
         )}
       >
         <div className="flex h-14 items-center justify-between border-b border-border px-4 lg:hidden">
@@ -135,7 +140,7 @@ export function AdminLayout() {
         <div className="hidden h-16 items-center border-b border-border px-5 lg:flex">
           <Logo suffix="管理后台" />
         </div>
-        <nav className="flex-1 space-y-3 overflow-y-auto px-3 py-3">
+        <nav className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-3 py-3">
           {NAV_GROUPS.map((group) => (
             <div key={group.label} className="space-y-0.5">
               <div className="px-3 pb-1 pt-1 text-tiny font-semibold uppercase tracking-wider text-text-tertiary">

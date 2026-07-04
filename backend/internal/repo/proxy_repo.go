@@ -92,16 +92,15 @@ func (r *ProxyRepo) SoftDelete(ctx context.Context, id uint64) error {
 		Where("id = ?", id).Update("deleted_at", time.Now().UTC()).Error
 }
 
-// SoftDeleteMany 按 ID 列表批量软删除。
-func (r *ProxyRepo) SoftDeleteMany(ctx context.Context, ids []uint64) (int64, error) {
+// SoftDeleteByIDs 批量软删除。
+func (r *ProxyRepo) SoftDeleteByIDs(ctx context.Context, ids []uint64) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	now := time.Now().UTC()
-	res := r.db.WithContext(ctx).Model(&model.Proxy{}).
+	tx := r.db.WithContext(ctx).Model(&model.Proxy{}).
 		Where("id IN ? AND deleted_at IS NULL", ids).
-		Update("deleted_at", now)
-	return res.RowsAffected, res.Error
+		Update("deleted_at", time.Now().UTC())
+	return tx.RowsAffected, tx.Error
 }
 
 // MarkCheck 记录探测结果。

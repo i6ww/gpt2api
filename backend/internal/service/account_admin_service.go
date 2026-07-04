@@ -4,7 +4,6 @@ package service
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -141,6 +140,7 @@ func (s *AccountAdminService) Create(ctx context.Context, adminID uint64, req *d
 		return nil, errcode.DBError.Wrap(err)
 	}
 	s.pool.Reload(req.Provider)
+	s.scheduleAutoProbeImportedAccounts(a)
 	return a, nil
 }
 
@@ -171,6 +171,7 @@ func (s *AccountAdminService) Update(ctx context.Context, id uint64, req *dto.Ac
 			fields["access_token_enc"] = nil
 			fields["access_token_expires_at"] = nil
 		}
+		fields["model_whitelist"] = nil
 	}
 	// OAuth 三件套：单独更新（仅 OAuth 账号生效；非 OAuth 静默忽略）
 	if cur.AuthType == model.AuthTypeOAuth {
@@ -232,6 +233,7 @@ func (s *AccountAdminService) Update(ctx context.Context, id uint64, req *dto.Ac
 	}
 	if req.BaseURL != nil {
 		fields["base_url"] = *req.BaseURL
+		fields["model_whitelist"] = nil
 	}
 	if req.ProxyID != nil {
 		if *req.ProxyID == 0 {
@@ -239,6 +241,7 @@ func (s *AccountAdminService) Update(ctx context.Context, id uint64, req *dto.Ac
 		} else {
 			fields["proxy_id"] = *req.ProxyID
 		}
+		fields["model_whitelist"] = nil
 	}
 	if req.Weight != nil {
 		fields["weight"] = *req.Weight
@@ -284,6 +287,7 @@ func (s *AccountAdminService) Delete(ctx context.Context, id uint64) error {
 func (s *AccountAdminService) reloadPoolGPTAndGrok() {
 	s.pool.Reload(model.ProviderGPT)
 	s.pool.Reload(model.ProviderGROK)
+	s.pool.Reload(model.ProviderPIC2API)
 }
 
 // BatchDeleteByIDs 批量软删账号。
@@ -345,14 +349,14 @@ func (s *AccountAdminService) PurgeAccounts(ctx context.Context, req *dto.Accoun
 	)
 	switch req.Scope {
 	case "invalid":
-		n, err = s.repo.SoftDeleteInvalid(ctx, req.Provider)
+		n, err = s.repo.SoftDeleteInvalidByAuthType(ctx, req.Provider, strings.ToLower(strings.TrimSpace(req.AuthType)))
 	case "zero_quota":
-		n, err = s.repo.SoftDeleteZeroQuota(ctx, req.Provider)
+		n, err = s.repo.SoftDeleteZeroQuotaByAuthType(ctx, req.Provider, strings.ToLower(strings.TrimSpace(req.AuthType)))
 	case "all":
 		if req.Confirm != "DELETE_ALL_ACCOUNTS" {
 			return 0, errcode.InvalidParam.WithMsg("清空全部账号须在 confirm 填入 DELETE_ALL_ACCOUNTS")
 		}
-		n, err = s.repo.SoftDeleteAll(ctx, req.Provider)
+		n, err = s.repo.SoftDeleteAllByAuthType(ctx, req.Provider, strings.ToLower(strings.TrimSpace(req.AuthType)))
 	default:
 		return 0, errcode.InvalidParam.WithMsg("scope 仅支持 all / invalid")
 	}
@@ -369,8 +373,9 @@ func (s *AccountAdminService) PurgeAccounts(ctx context.Context, req *dto.Accoun
 func (s *AccountAdminService) List(ctx context.Context, req *dto.AccountListReq) ([]*dto.AccountResp, int64, error) {
 	items, total, err := s.repo.List(ctx, repo.AccountListFilter{
 		Provider: req.Provider,
-		Status:   req.Status,
 		PlanType: strings.ToLower(strings.TrimSpace(req.PlanType)),
+		AuthType: strings.ToLower(strings.TrimSpace(req.AuthType)),
+		Status:   req.Status,
 		Keyword:  req.Keyword,
 		Page:     req.Page,
 		PageSize: req.PageSize,
@@ -465,14 +470,8 @@ func (s *AccountAdminService) BatchImport(ctx context.Context, adminID uint64, r
 		return nil, errcode.DBError.Wrap(err)
 	}
 	s.pool.Reload(req.Provider)
-	detected, failed := s.probeImportedGrokAccounts(ctx, items)
-	return &dto.BatchImportResult{
-		Imported: len(items),
-		Skipped:  0,
-		Detected: detected,
-		Pending:  maxInt(0, len(items)-detected-failed),
-		Failed:   failed,
-	}, nil
+	s.scheduleAutoProbeImportedAccounts(items...)
+	return &dto.BatchImportResult{Imported: len(items), Skipped: 0}, nil
 }
 
 func (s *AccountAdminService) batchImportSub2API(ctx context.Context, adminID uint64, req *dto.AccountBatchImportReq) (*dto.BatchImportResult, error) {
@@ -600,14 +599,55 @@ func (s *AccountAdminService) batchImportSub2API(ctx context.Context, adminID ui
 	for p := range seen {
 		s.pool.Reload(p)
 	}
-	detected, failed := s.probeImportedGrokAccounts(ctx, items)
-	return &dto.BatchImportResult{
-		Imported: len(items),
-		Skipped:  skipped,
-		Detected: detected,
-		Pending:  maxInt(0, len(items)-detected-failed),
-		Failed:   failed,
-	}, nil
+	s.scheduleAutoProbeImportedAccounts(items...)
+	return &dto.BatchImportResult{Imported: len(items), Skipped: skipped}, nil
+}
+
+func (s *AccountAdminService) scheduleAutoProbeImportedAccounts(items ...*model.Account) {
+	if s == nil || s.testSvc == nil || len(items) == 0 {
+		return
+	}
+	targets := make([]*model.Account, 0, len(items))
+	for _, item := range items {
+		if item == nil || item.Provider != model.ProviderGROK || item.AuthType != model.AuthTypeCookie {
+			continue
+		}
+		targets = append(targets, item)
+	}
+	if len(targets) == 0 {
+		return
+	}
+	go s.autoProbeImportedAccounts(targets)
+}
+
+func (s *AccountAdminService) autoProbeImportedAccounts(items []*model.Account) {
+	if s == nil || s.testSvc == nil || len(items) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	sem := make(chan struct{}, 3)
+	var wg sync.WaitGroup
+	for _, acc := range items {
+		a := acc
+		if a == nil {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+			_, _ = s.testSvc.Test(ctx, a)
+		}()
+	}
+	wg.Wait()
+	s.pool.Reload(model.ProviderGROK)
 }
 
 func mapSub2APIPlatform(p string) string {
@@ -616,6 +656,8 @@ func mapSub2APIPlatform(p string) string {
 		return model.ProviderGPT
 	case "grok", "x-ai", "xai":
 		return model.ProviderGROK
+	case "pic2api":
+		return model.ProviderPIC2API
 	default:
 		return ""
 	}
@@ -646,7 +688,23 @@ func (s *AccountAdminService) Test(ctx context.Context, id uint64) (*dto.Account
 	if err != nil {
 		return nil, errcode.ResourceMissing
 	}
-	return s.testSvc.Test(ctx, a)
+	resp, err := s.testSvc.Test(ctx, a)
+	if err != nil {
+		return nil, err
+	}
+	s.pool.Reload(a.Provider)
+	return resp, nil
+}
+
+func (s *AccountAdminService) SyncModels(ctx context.Context, id uint64) (*dto.AccountModelsResp, error) {
+	if s.testSvc == nil {
+		return nil, errcode.Internal.WithMsg("模型同步服务未启用")
+	}
+	a, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, errcode.ResourceMissing
+	}
+	return s.testSvc.FetchSupportedModels(ctx, a)
 }
 
 // RefreshOAuth 刷新 OAuth 账号 RT。
@@ -797,58 +855,6 @@ func (s *AccountAdminService) BatchProbeQuota(ctx context.Context, provider stri
 	}, nil
 }
 
-// BatchAssignProxy 批量设置账号代理。
-func (s *AccountAdminService) BatchAssignProxy(ctx context.Context, req *dto.AccountBatchAssignProxyReq) (*dto.AccountBatchAssignProxyResp, error) {
-	if len(req.AccountIDs) == 0 {
-		return nil, errcode.InvalidParam.WithMsg("account_ids 不能为空")
-	}
-	switch req.Mode {
-	case "single":
-		if req.ProxyID == nil {
-			return nil, errcode.InvalidParam.WithMsg("single 模式需要 proxy_id")
-		}
-	case "cycle":
-		if len(req.ProxyIDs) == 0 {
-			return nil, errcode.InvalidParam.WithMsg("cycle 模式需要 proxy_ids")
-		}
-	default:
-		return nil, errcode.InvalidParam.WithMsg("mode 仅支持 single / cycle")
-	}
-
-	updated := 0
-	seenProvider := map[string]struct{}{}
-	for idx, accountID := range req.AccountIDs {
-		acc, err := s.repo.GetByID(ctx, accountID)
-		if err != nil {
-			return nil, errcode.ResourceMissing.WithMsg(fmt.Sprintf("账号 %d 不存在", accountID))
-		}
-		var proxyValue any
-		if req.Mode == "single" {
-			if req.ProxyID != nil && *req.ProxyID > 0 {
-				proxyValue = *req.ProxyID
-			} else {
-				proxyValue = nil
-			}
-		} else {
-			pid := req.ProxyIDs[idx%len(req.ProxyIDs)]
-			if pid > 0 {
-				proxyValue = pid
-			} else {
-				proxyValue = nil
-			}
-		}
-		if err := s.repo.Update(ctx, acc.ID, map[string]any{"proxy_id": proxyValue}); err != nil {
-			return nil, errcode.DBError.Wrap(err)
-		}
-		seenProvider[acc.Provider] = struct{}{}
-		updated++
-	}
-	for provider := range seenProvider {
-		s.pool.Reload(provider)
-	}
-	return &dto.AccountBatchAssignProxyResp{Updated: updated}, nil
-}
-
 func accountSupportsQuotaProbe(a *model.Account) bool {
 	if a == nil {
 		return false
@@ -861,51 +867,6 @@ func accountSupportsQuotaProbe(a *model.Account) bool {
 	default:
 		return false
 	}
-}
-
-func (s *AccountAdminService) probeImportedGrokAccounts(ctx context.Context, items []*model.Account) (int, int) {
-	if s.testSvc == nil || len(items) == 0 {
-		return 0, 0
-	}
-	detected := 0
-	failed := 0
-	var mu sync.Mutex
-	sem := make(chan struct{}, 4)
-	var wg sync.WaitGroup
-	for _, item := range items {
-		if item == nil || item.Provider != model.ProviderGROK || item.AuthType != model.AuthTypeCookie {
-			continue
-		}
-		acc := item
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				mu.Lock()
-				failed++
-				mu.Unlock()
-				return
-			}
-			defer func() { <-sem }()
-			res, err := s.testSvc.Test(ctx, acc)
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil || res == nil || !res.OK {
-				failed++
-				return
-			}
-			if strings.TrimSpace(res.PlanType) != "" {
-				detected++
-			}
-		}()
-	}
-	wg.Wait()
-	if detected > 0 || failed > 0 {
-		s.pool.Reload(model.ProviderGROK)
-	}
-	return detected, failed
 }
 
 // === helpers ===
@@ -1022,6 +983,7 @@ func accountToResp(a *model.Account, _ *crypto.AESGCM) *dto.AccountResp {
 	if a.LastTestError != nil {
 		r.LastTestError = *a.LastTestError
 	}
+	r.SupportedModels = parseModelWhitelist(a.ModelWhitelist)
 	fillAccountProbeFields(r, a)
 	return r
 }
@@ -1045,6 +1007,17 @@ func fillAccountProbeFields(r *dto.AccountResp, a *model.Account) {
 	r.ImageQuotaRemaining = intFromMeta(meta, "image_quota_remaining")
 	r.ImageQuotaTotal = intFromMeta(meta, "image_quota_total")
 	r.ImageQuotaResetAt = int64FromMeta(meta, "image_quota_reset_at")
+}
+
+func parseModelWhitelist(raw *string) []string {
+	if raw == nil || strings.TrimSpace(*raw) == "" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(*raw), &out); err != nil || len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func intFromMeta(meta map[string]any, key string) int {
@@ -1080,10 +1053,3 @@ func int64FromMeta(meta map[string]any, key string) int64 {
 }
 
 func strPtr(s string) *string { return &s }
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}

@@ -23,17 +23,17 @@ type AdminDashboardOverviewResp struct {
 }
 
 type DashboardProviderRow struct {
-	Provider       string `json:"provider"`
-	Total          int64  `json:"total"`
-	Enabled        int64  `json:"enabled"`
-	Available      int64  `json:"available"`
-	Broken         int64  `json:"broken"`
-	TestOK         int64  `json:"test_ok"`
-	QuotaRemaining int64  `json:"quota_remaining"`
-	QuotaTotal     int64  `json:"quota_total"`
-	QuotaUsed      int64  `json:"quota_used"`
-	SuccessCount   int64  `json:"success_count"`
-	ErrorCount     int64  `json:"error_count"`
+	Provider       string  `json:"provider"`
+	Total          int64   `json:"total"`
+	Enabled        int64   `json:"enabled"`
+	Available      int64   `json:"available"`
+	Broken         int64   `json:"broken"`
+	TestOK         int64   `json:"test_ok"`
+	QuotaRemaining float64 `json:"quota_remaining"`
+	QuotaTotal     float64 `json:"quota_total"`
+	QuotaUsed      float64 `json:"quota_used"`
+	SuccessCount   int64   `json:"success_count"`
+	ErrorCount     int64   `json:"error_count"`
 }
 
 type DashboardRecentTask struct {

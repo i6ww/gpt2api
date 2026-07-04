@@ -1,17 +1,24 @@
 // 高层 API 服务：分领域封装，UI 层只看 services.* 不直接 import axios。
 import { request } from './api';
 import type {
+  Announcement,
   APIKey,
   APIKeyCreateBody,
   APIKeyCreated,
+  APIKeyStatsQuery,
+  APIKeyStatsResp,
   CreateImageBody,
+  CreateMusicBody,
   CreateTextBody,
   CreateVideoBody,
   GenerationTask,
+  Invitee,
+  InviteSummary,
   LoginResp,
   MeResp,
   PageData,
   PublicModel,
+  RechargeProductsResp,
   RedeemCDKResp,
   RegisterResp,
   TextGenerationResp,
@@ -47,10 +54,19 @@ export const keysApi = {
       params: { enable: enable ? 1 : 0 },
     }),
   remove: (id: number) => request<null>({ method: 'DELETE', url: `/keys/${id}` }),
+  stats: (q: APIKeyStatsQuery = {}) =>
+    request<APIKeyStatsResp>({
+      method: 'GET',
+      url: '/keys/stats',
+      params: {
+        since: q.since && q.since > 0 ? q.since : undefined,
+        until: q.until && q.until > 0 ? q.until : undefined,
+      },
+    }),
 };
 
 export const billingApi = {
-  logs: (page = 1, pageSize = 20) =>
+  logs: (page = 1, pageSize = 10) =>
     request<PageData<WalletLog>>({
       method: 'GET',
       url: '/billing/logs',
@@ -58,6 +74,21 @@ export const billingApi = {
     }),
   redeemCDK: (code: string) =>
     request<RedeemCDKResp>({ method: 'POST', url: '/billing/cdk/redeem', data: { code } }),
+  // 充值套餐 + 客服联系方式。后端 /v1/recharge/products 免登录、已过滤敏感字段。
+  rechargeProducts: () =>
+    request<RechargeProductsResp>({ method: 'GET', url: '/recharge/products' }),
+};
+
+// 公告：用户端首页顶部滚动条，匿名也可调用（后端 /api/v1/announcements 不要求 auth）。
+export const announcementsApi = {
+  list: async (): Promise<Announcement[]> => {
+    const r = await request<{ list: Announcement[] } | Announcement[] | null>({
+      method: 'GET',
+      url: '/announcements',
+    });
+    if (Array.isArray(r)) return r;
+    return r?.list ?? [];
+  },
 };
 
 export const genApi = {
@@ -87,9 +118,16 @@ export const genApi = {
       data: body,
       headers: idemKey ? { 'Idempotency-Key': idemKey } : undefined,
     }),
+  createMusic: (body: CreateMusicBody, idemKey?: string) =>
+    request<GenerationTask>({
+      method: 'POST',
+      url: '/gen/music',
+      data: body,
+      headers: idemKey ? { 'Idempotency-Key': idemKey } : undefined,
+    }),
   getTask: (taskId: string) =>
     request<GenerationTask>({ method: 'GET', url: `/gen/tasks/${taskId}` }),
-  history: (params: { kind?: 'image' | 'video' | 'media'; page?: number; page_size?: number } = {}) =>
+  history: (params: { kind?: 'image' | 'video' | 'media' | 'music'; page?: number; page_size?: number } = {}) =>
     request<PageData<GenerationTask>>({
       method: 'GET',
       url: '/gen/history',
@@ -101,4 +139,17 @@ export const genApi = {
     }),
   deleteHistory: (scope: 'before_3d' | 'before_7d' | 'failed' | 'all') =>
     request<{ deleted: number }>({ method: 'DELETE', url: '/gen/history', params: { scope } }),
+  /** 边缘节点下载失败时主动汇报；服务端把 (asset_kind, asset_key, node_id) 标 tainted。 */
+  reportTainted: (body: { asset_kind?: string; asset_key: string; node_id: string; reason?: string }) =>
+    request<{ ok: boolean }>({ method: 'POST', url: '/gen/cached/tainted', data: body }),
+};
+
+export const inviteApi = {
+  summary: () => request<InviteSummary>({ method: 'GET', url: '/invite/summary' }),
+  invitees: (page = 1, pageSize = 10) =>
+    request<PageData<Invitee>>({
+      method: 'GET',
+      url: '/invite/invitees',
+      params: { page, page_size: pageSize },
+    }),
 };

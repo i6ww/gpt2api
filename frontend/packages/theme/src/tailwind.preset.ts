@@ -70,6 +70,8 @@ const preset: Partial<Config> = {
         },
         success: { DEFAULT: 'var(--success-500)', soft: 'var(--success-soft)' },
         warning: { DEFAULT: 'var(--warning-500)', soft: 'var(--warning-soft)' },
+        // warn 是 warning 的简写别名，业务代码里大量使用（bg-warn / text-warn / bg-warn-soft）
+        warn:    { DEFAULT: 'var(--warning-500)', soft: 'var(--warning-soft)' },
         danger:  { DEFAULT: 'var(--danger-500)',  soft: 'var(--danger-soft)' },
         info:    { DEFAULT: 'var(--info-500)',    soft: 'var(--info-soft)' },
         surface: {

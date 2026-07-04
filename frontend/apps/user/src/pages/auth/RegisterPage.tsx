@@ -1,45 +1,66 @@
 import { Link, useNavigate } from 'react-router-dom';
-import { useForm } from 'react-hook-form';
+import { Controller, useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
 import clsx from 'clsx';
+import { useTranslation } from 'react-i18next';
 
 import { ApiError } from '../../lib/api';
 import { authApi } from '../../lib/services';
 import { useAuthStore } from '../../stores/auth';
 import { toast } from '../../stores/toast';
+import { LegalAgreement } from '../../components/LegalDocs';
 
-const schema = z
-  .object({
-    account: z.string().min(3, '账号至少 3 位').max(64, '账号过长'),
-    password: z
-      .string()
-      .min(8, '密码至少 8 位')
-      .max(64, '密码过长')
-      .regex(/[A-Za-z]/, '密码需包含字母')
-      .regex(/[0-9]/, '密码需包含数字'),
-    confirm: z.string(),
-    invite_code: z.string().max(16).optional().or(z.literal('')),
-  })
-  .refine((d) => d.password === d.confirm, {
-    message: '两次密码不一致',
-    path: ['confirm'],
-  });
-
-type FormValues = z.infer<typeof schema>;
+type FormValues = {
+  account: string;
+  password: string;
+  confirm: string;
+  invite_code: string;
+  agree: true;
+};
 
 export default function RegisterPage() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const setToken = useAuthStore((s) => s.setToken);
   const refreshMe = useAuthStore((s) => s.refreshMe);
 
+  // schema 跟着 i18n 重建，切换语言时校验报错也跟着切换。
+  const schema = z
+    .object({
+      account: z.string().min(3, t('auth.account_min')).max(64, t('auth.account_max')),
+      password: z
+        .string()
+        .min(8, t('auth.password_min_8'))
+        .max(64, t('auth.password_max'))
+        .regex(/[A-Za-z]/, t('auth.password_needs_letter'))
+        .regex(/[0-9]/, t('auth.password_needs_digit')),
+      confirm: z.string(),
+      invite_code: z.string().max(16).optional().or(z.literal('')),
+      // 注册必须主动勾选「同意服务条款与隐私政策」，规避法律风险。
+      agree: z.literal(true, {
+        errorMap: () => ({ message: t('auth.agree_required') }),
+      }),
+    })
+    .refine((d) => d.password === d.confirm, {
+      message: t('auth.passwords_mismatch'),
+      path: ['confirm'],
+    });
+
   const {
     register,
     handleSubmit,
+    control,
     formState: { errors, isSubmitting },
   } = useForm<FormValues>({
     resolver: zodResolver(schema),
-    defaultValues: { account: '', password: '', confirm: '', invite_code: '' },
+    defaultValues: {
+      account: '',
+      password: '',
+      confirm: '',
+      invite_code: '',
+      agree: false as unknown as true,
+    },
   });
 
   const onSubmit = async (values: FormValues) => {
@@ -51,10 +72,10 @@ export default function RegisterPage() {
       });
       setToken(resp.token);
       await refreshMe();
-      toast.success('注册成功，已为你登录');
+      toast.success(t('auth.register_success'));
       navigate('/create/image', { replace: true });
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : '注册失败，请重试';
+      const msg = err instanceof ApiError ? err.message : t('auth.register_failed');
       toast.error(msg);
     }
   };
@@ -62,16 +83,16 @@ export default function RegisterPage() {
   return (
     <div className="space-y-6">
       <header className="space-y-2">
-        <h1 className="text-h1 text-text-primary">注册账号</h1>
-        <p className="text-body text-text-secondary">创建账号开启你的 AIGC 之旅</p>
+        <h1 className="text-h1 text-text-primary">{t('auth.create_account')}</h1>
+        <p className="text-body text-text-secondary">{t('auth.register_hint')}</p>
       </header>
 
       <form className="space-y-4" onSubmit={handleSubmit(onSubmit)} noValidate>
         <div className="field">
-          <label className="field-label">账号</label>
+          <label className="field-label">{t('auth.account')}</label>
           <input
             className={clsx('input', errors.account && 'input-error')}
-            placeholder="邮箱 / 手机号 / 用户名"
+            placeholder={t('auth.account_placeholder')}
             autoComplete="username"
             {...register('account')}
           />
@@ -79,11 +100,11 @@ export default function RegisterPage() {
         </div>
 
         <div className="field">
-          <label className="field-label">设置密码</label>
+          <label className="field-label">{t('auth.password')}</label>
           <input
             className={clsx('input', errors.password && 'input-error')}
             type="password"
-            placeholder="≥ 8 位，含字母与数字"
+            placeholder={t('auth.password_strong_hint')}
             autoComplete="new-password"
             {...register('password')}
           />
@@ -91,11 +112,11 @@ export default function RegisterPage() {
         </div>
 
         <div className="field">
-          <label className="field-label">确认密码</label>
+          <label className="field-label">{t('auth.confirm_password')}</label>
           <input
             className={clsx('input', errors.confirm && 'input-error')}
             type="password"
-            placeholder="再次输入密码"
+            placeholder={t('auth.confirm_password_placeholder')}
             autoComplete="new-password"
             {...register('confirm')}
           />
@@ -103,23 +124,35 @@ export default function RegisterPage() {
         </div>
 
         <div className="field">
-          <label className="field-label">邀请码（选填）</label>
-          <input className="input" placeholder="填写以获得额外点数" {...register('invite_code')} />
-          <p className="field-hint">使用邀请码注册可获得额外赠点。</p>
+          <label className="field-label">{t('auth.invite_code')}</label>
+          <input
+            className="input"
+            placeholder={t('auth.invite_code_placeholder')}
+            {...register('invite_code')}
+          />
+          <p className="field-hint">{t('auth.invite_code_hint')}</p>
         </div>
 
-        <button className="btn btn-primary btn-lg btn-block" type="submit" disabled={isSubmitting}>
-          {isSubmitting ? '创建中…' : '创 建 账 号'}
-        </button>
+        <Controller
+          control={control}
+          name="agree"
+          render={({ field }) => (
+            <LegalAgreement
+              checked={Boolean(field.value)}
+              onChange={(v) => field.onChange(v)}
+              error={errors.agree?.message}
+            />
+          )}
+        />
 
-        <p className="text-small text-text-tertiary text-center">
-          注册即代表同意 <a className="text-klein-500">服务条款</a> 与 <a className="text-klein-500">隐私政策</a>
-        </p>
+        <button className="btn btn-primary btn-lg btn-block" type="submit" disabled={isSubmitting}>
+          {isSubmitting ? t('auth.registering') : t('auth.register_btn')}
+        </button>
       </form>
 
       <p className="text-small text-text-secondary text-center">
-        已有账号？
-        <Link to="/login" className="text-klein-500 hover:underline ml-1">立即登录</Link>
+        {t('auth.has_account')}
+        <Link to="/login" className="text-klein-500 hover:underline ml-1">{t('auth.login_now')}</Link>
       </p>
     </div>
   );

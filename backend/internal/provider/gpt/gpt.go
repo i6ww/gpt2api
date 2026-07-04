@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -70,13 +71,18 @@ func New(defaultBase string) *Provider {
 func (p *Provider) Name() string { return p.name }
 
 type imgReq struct {
-	Model          string `json:"model"`
-	Prompt         string `json:"prompt"`
-	N              int    `json:"n,omitempty"`
-	Size           string `json:"size,omitempty"`
-	Quality        string `json:"quality,omitempty"`
-	Style          string `json:"style,omitempty"`
-	ResponseFormat string `json:"response_format,omitempty"`
+	Model          string   `json:"model"`
+	Prompt         string   `json:"prompt"`
+	N              int      `json:"n,omitempty"`
+	Size           string   `json:"size,omitempty"`
+	Quality        string   `json:"quality,omitempty"`
+	Style          string   `json:"style,omitempty"`
+	Operation      string   `json:"operation,omitempty"`
+	Image          string   `json:"image,omitempty"`
+	Images         []string `json:"images,omitempty"`
+	RefAssets      []string `json:"ref_assets,omitempty"`
+	ImageURLs      []string `json:"image_urls,omitempty"`
+	ResponseFormat string   `json:"response_format,omitempty"`
 }
 
 type imgRespItem struct {
@@ -136,6 +142,7 @@ type responseOutputItem struct {
 	RevisedPrompt string `json:"revised_prompt"`
 	Content       []struct {
 		Type     string `json:"type"`
+		Text     string `json:"text"`
 		Result   string `json:"result"`
 		B64JSON  string `json:"b64_json"`
 		ImageB64 string `json:"image_b64"`
@@ -151,10 +158,10 @@ func (p *Provider) Generate(ctx context.Context, req *provider.Request) (*provid
 	if req.Credential == "" {
 		return nil, fmt.Errorf("gpt provider missing credential")
 	}
-	if isGPTImage2(req.ModelCode) {
-		if shouldUseWebImage2(req) {
-			return p.generateImage2Web(ctx, req)
-		}
+	// gpt-image-2 统一走 ChatGPT Codex Responses API（chatgpt.com/backend-api/codex/responses）。
+	// 1K/2K/4K 全部由 generateImage2 在 codex 端点上出图，不再走旧的 web conversation 路径。
+	// 失败（429/5xx/超时）时由 generation_service.runTask 检测 transient error 触发 adobe firefly fallback。
+	if isGPTImage2(req.ModelCode) && shouldUseNativeImage2(req) {
 		return p.generateImage2(ctx, req)
 	}
 
@@ -178,6 +185,13 @@ func (p *Provider) Generate(ctx context.Context, req *provider.Request) (*provid
 		Quality:        strParam(req.Params, "quality", ""),
 		Style:          strParam(req.Params, "style", ""),
 		ResponseFormat: "url",
+	}
+	if len(req.RefAssets) > 0 {
+		body.Image = req.RefAssets[0]
+		body.Images = append([]string(nil), req.RefAssets...)
+		body.RefAssets = append([]string(nil), req.RefAssets...)
+		body.ImageURLs = append([]string(nil), req.RefAssets...)
+		body.Operation = "edit"
 	}
 	payload, _ := json.Marshal(body)
 
@@ -212,10 +226,6 @@ func (p *Provider) Generate(ctx context.Context, req *provider.Request) (*provid
 	if out.Error != nil && out.Error.Message != "" {
 		return nil, fmt.Errorf("gpt: %s", out.Error.Message)
 	}
-	if len(out.Data) == 0 {
-		return nil, fmt.Errorf("gpt returned 0 image")
-	}
-
 	width, height := parseSize(body.Size)
 	assets := make([]provider.Asset, 0, len(out.Data))
 	for _, d := range out.Data {
@@ -230,6 +240,12 @@ func (p *Provider) Generate(ctx context.Context, req *provider.Request) (*provid
 			a.URL = "data:image/png;base64," + d.B64JSON
 		}
 		assets = append(assets, a)
+	}
+	if len(assets) == 0 {
+		assets = extractCompatImageAssets(raw, width, height)
+	}
+	if len(assets) == 0 {
+		return nil, fmt.Errorf("gpt returned 0 image (raw=%s)", snippet(raw, 240))
 	}
 
 	return &provider.Result{
@@ -268,7 +284,7 @@ func (p *Provider) generateImage2Web(ctx context.Context, req *provider.Request)
 	ratio := webRatioFromSize(size, strParam(req.Params, "ratio", strParam(req.Params, "aspect_ratio", "1:1")))
 	prompt := webImagePromptV2(req.Prompt, ratio, size)
 	webModel := webImageModelSlug(req)
-	client, err := p.httpClient(req.ProxyURL)
+	client, err := p.webImageHTTPClient(req.ProxyURL)
 	if err != nil {
 		return nil, err
 	}
@@ -285,11 +301,21 @@ func (p *Provider) generateImage2Web(ctx context.Context, req *provider.Request)
 			"ref_count": len(req.RefAssets),
 		},
 	})
-	if err := p.webBootstrap(ctx, client, base, fp); err != nil {
+	bootstrapWarn, err := p.webBootstrap(ctx, client, base, &fp)
+	if err != nil {
 		logUpstream(ctx, req, provider.UpstreamLogEntry{Provider: "gpt", Stage: "web.bootstrap", Method: "GET", URL: base + "/", Error: err.Error()})
 		return nil, err
 	}
-	reqs, err := p.webRequirements(ctx, client, base, fp, req.Credential)
+	if bootstrapWarn != "" {
+		logUpstream(ctx, req, provider.UpstreamLogEntry{
+			Provider: "gpt",
+			Stage:    "web.bootstrap",
+			Method:   "GET",
+			URL:      base + "/",
+			Meta:     map[string]any{"warn": bootstrapWarn, "device_id": fp.DeviceID},
+		})
+	}
+	reqs, err := p.webRequirementsWithRetry(ctx, client, base, fp, req.Credential)
 	if err != nil {
 		logUpstream(ctx, req, provider.UpstreamLogEntry{Provider: "gpt", Stage: "web.requirements", Method: "POST", URL: base + "/backend-api/sentinel/chat-requirements", Error: err.Error()})
 		return nil, err
@@ -327,14 +353,16 @@ func (p *Provider) generateImage2Web(ctx context.Context, req *provider.Request)
 	width, height := parseSize(size)
 	assets := make([]provider.Asset, 0, count)
 	lastDiag := ""
+	parentMessageID := "client-created-root"
 	for i := 0; i < count && len(assets) < count; i++ {
-		conduit, err := p.webPrepareImageConversation(ctx, client, base, fp, req.Credential, reqs, prompt, webModel, refs)
+		messageID := uuid.NewString()
+		conduit, err := p.webPrepareImageConversation(ctx, client, base, fp, req.Credential, reqs, prompt, webModel, parentMessageID, messageID, refs)
 		if err != nil {
 			logUpstream(ctx, req, provider.UpstreamLogEntry{Provider: "gpt", Stage: "web.prepare", Method: "POST", URL: base + "/backend-api/f/conversation/prepare", Error: err.Error()})
 			return nil, err
 		}
 		logUpstream(ctx, req, provider.UpstreamLogEntry{Provider: "gpt", Stage: "web.prepare", Method: "POST", URL: base + "/backend-api/f/conversation/prepare", Meta: map[string]any{"has_conduit": conduit != ""}})
-		conversationID, fileIDs, sedimentIDs, directURLs, lastText, err := p.webStartImageGeneration(ctx, client, base, fp, req.Credential, reqs, conduit, prompt, webModel, refs)
+		conversationID, fileIDs, sedimentIDs, directURLs, lastText, err := p.webStartImageGeneration(ctx, client, base, fp, req.Credential, reqs, conduit, prompt, webModel, parentMessageID, messageID, refs)
 		if err != nil {
 			logUpstream(ctx, req, provider.UpstreamLogEntry{Provider: "gpt", Stage: "web.conversation", Method: "POST", URL: base + "/backend-api/f/conversation", Error: err.Error()})
 			return nil, err
@@ -354,7 +382,16 @@ func (p *Provider) generateImage2Web(ctx context.Context, req *provider.Request)
 			},
 		})
 		var urls, downloadErrs []string
+		// poll deadline 取 min(9min, ctx 剩余 - 10s)：之前固定 9min 会导致 ctx 已经
+		// 快超时还在多睡 5s 等下一轮 poll，让外层 retry/fallback 路径多等一截。
+		// 留 10s buffer 是为了让最后一次 download/log 有时间完成。
 		deadline := time.Now().Add(9 * time.Minute)
+		if ctxDL, ok := ctx.Deadline(); ok {
+			ctxLimit := ctxDL.Add(-10 * time.Second)
+			if ctxLimit.Before(deadline) {
+				deadline = ctxLimit
+			}
+		}
 		pollCount := 0
 		for {
 			if conversationID != "" {
@@ -404,12 +441,23 @@ func (p *Provider) generateImage2Web(ctx context.Context, req *provider.Request)
 					URL:      sanitizeDiagURL(u),
 					Meta:     map[string]any{"mime": mime, "poll_count": pollCount},
 				})
+				// GPT web 实际返图尺寸常和我们 hint 的不一致（hint 1024² 经常变 1254² /
+				// hint 1344×768 变 1672×941），直接读 PNG IHDR 拿真实尺寸，让 meta 与
+				// 磁盘上 PNG 文件保持一致。读不出来就退回到 size hint。
+				realW, realH := probeImageDimsFromDataURL(dataURL, width, height)
 				assets = append(assets, provider.Asset{
 					URL:    dataURL,
-					Width:  width,
-					Height: height,
+					Width:  realW,
+					Height: realH,
 					Mime:   mime,
-					Meta:   map[string]any{"provider_route": "chatgpt_web", "size": "1K", "ratio": ratio},
+					Meta: map[string]any{
+						"provider_route": "chatgpt_web",
+						"size":           "1K",
+						"ratio":          ratio,
+						// requested_* 记录 hint，便于排查为啥实际 size 跟前端选的不完全一致。
+						"requested_width":  width,
+						"requested_height": height,
+					},
 				})
 				if len(assets) >= count {
 					break
@@ -417,6 +465,12 @@ func (p *Provider) generateImage2Web(ctx context.Context, req *provider.Request)
 			}
 			if len(assets) >= count || conversationID == "" || time.Now().After(deadline) {
 				break
+			}
+			// 下一轮 poll 间隔：默认 5s，但如果 deadline 离现在很近，缩短到剩余时间，
+			// 避免"睡完 5s 才发现 deadline 已过"白白浪费一次循环。
+			sleepDur := 5 * time.Second
+			if rem := time.Until(deadline); rem > 0 && rem < sleepDur {
+				sleepDur = rem
 			}
 			select {
 			case <-ctx.Done():
@@ -434,7 +488,7 @@ func (p *Provider) generateImage2Web(ctx context.Context, req *provider.Request)
 					},
 				})
 				return nil, fmt.Errorf("gpt image2 web wait: %w", ctx.Err())
-			case <-time.After(5 * time.Second):
+			case <-time.After(sleepDur):
 			}
 		}
 		lastDiag = webImage2Diag(conversationID, fileIDs, sedimentIDs, directURLs, urls, downloadErrs, lastText)
@@ -465,9 +519,12 @@ func (p *Provider) generateImage2Web(ctx context.Context, req *provider.Request)
 }
 
 func (p *Provider) generateImage2(ctx context.Context, req *provider.Request) (*provider.Result, error) {
+	// base 兜底：缺省 / 还是 OpenAI 官方域名时，强制走 ChatGPT Codex 端点
+	// （chatgpt.com/backend-api/codex/responses），用 ChatGPT Plus/Pro 订阅出图，不消耗 API token 配额。
+	// 只有当账号显式配置了 base_url（例如指向 api.openai.com 或自建网关）时才尊重该 base。
 	base := strings.TrimRight(req.BaseURL, "/")
-	if base == "" {
-		base = p.defaultURL
+	if base == "" || strings.Contains(strings.ToLower(base), "api.openai.com") {
+		base = "https://chatgpt.com/backend-api/codex"
 	}
 	url := responseEndpoint(base)
 	count := req.Count
@@ -477,7 +534,8 @@ func (p *Provider) generateImage2(ctx context.Context, req *provider.Request) (*
 	modelCode := req.ModelCode
 	mainModel := strParam(req.Params, "main_model", mainModelForImage2(modelCode))
 	toolModel := imageToolModel(modelCode)
-	size := imageSize(req.Params, "1024x1024")
+	// 用户传 size 走 normalizeImage2Size 校验 + 档位收敛（保证落到 OpenAI 接受的 16 倍数 + 长短比 ≤ 3:1）。
+	size := normalizeImage2Size(req.Params)
 	action := "generate"
 	if req.Mode == provider.ModeI2I || len(req.RefAssets) > 0 || strings.EqualFold(strParam(req.Params, "operation", ""), "edit") {
 		action = "edit"
@@ -509,8 +567,12 @@ func (p *Provider) generateImage2(ctx context.Context, req *provider.Request) (*
 	if mask := firstStringParam(req.Params, "mask", "mask_image_url"); mask != "" {
 		tool["input_image_mask"] = map[string]string{"image_url": mask}
 	}
+	// instructions 必须非空（codex 端点会校验），同时给一段引导让模型在用户描述图片时主动调 image_generation 工具。
+	instructions := strParam(req.Params, "instructions",
+		"You are a helpful AI assistant. When the user describes or asks for an image, "+
+			"or asks to edit/transform a reference image, use the image_generation tool to create the image.")
 	body := responseReq{
-		Instructions:      "You are an image generation assistant. Follow the user's prompt and return the generated image.",
+		Instructions:      instructions,
 		Stream:            true,
 		Reasoning:         map[string]any{"effort": "medium", "summary": "auto"},
 		ParallelToolCalls: true,
@@ -560,7 +622,11 @@ func (p *Provider) generateImage2(ctx context.Context, req *provider.Request) (*
 			httpReq.Header.Set("Accept", "text/event-stream")
 			httpReq.Header.Set("User-Agent", userAgentForEndpoint(url))
 			if isCodexEndpoint(url) {
-				httpReq.Header.Set("Originator", "codex-tui")
+				httpReq.Header.Set("OpenAI-Beta", "responses=experimental")
+				httpReq.Header.Set("originator", "codex_cli_rs")
+				httpReq.Header.Set("version", codexCLIVersion)
+				httpReq.Header.Set("session_id", uuid.NewString())
+				httpReq.Header.Set("Accept-Language", "en-US,en;q=0.9")
 				httpReq.Header.Set("Connection", "Keep-Alive")
 			}
 			resp, err := client.Do(httpReq)
@@ -678,7 +744,15 @@ func (p *Provider) generateImage2(ctx context.Context, req *provider.Request) (*
 			}
 			for _, out := range completed.Response.Output {
 				imageData, imageURL := outputImagePayload(out)
-				if out.Type != "image_generation_call" && imageData == "" && imageURL == "" {
+				// 老 bug：条件是 `Type != image_generation_call && imageData == "" && imageURL == ""`
+				//   —— 是 &&，只有"非图类型 + 没数据"才跳过。
+				// 实际：Type 是 image_generation_call 但 result/b64/url 全空时
+				//   （gpt-5.5 作为 main_model 偶发：返了"图生成调用"但没真出 b64，
+				//   可能因为内容策略 / 风控 / 上游 token 中断），老逻辑会继续拼出
+				//   `data:image/png;base64,` 空串落库，前端展示空白且无法重试。
+				// 修复：不管 type，没数据就跳。assets 累计为 0 时会走下面的
+				//   "returned 0 image" 错误路径，让用户看到失败而不是空图。
+				if imageData == "" && imageURL == "" {
 					continue
 				}
 				mime := mimeForImageFormat(out.OutputFormat)
@@ -765,35 +839,13 @@ type webFP struct {
 
 func newWebFP() webFP {
 	return webFP{
-		UserAgent:     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
-		DeviceID:      uuid.NewString(),
+		UserAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+		// DeviceID 由 webBootstrap 从 oai-did cookie 填充；没有则随机 UUID。
 		SessionID:     uuid.NewString(),
 		ClientVersion: "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad",
 		BuildNumber:   "5955942",
 		SecCHUA:       `"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"`,
 	}
-}
-
-func (p *Provider) webBootstrap(ctx context.Context, client *http.Client, base string, fp webFP) error {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/", nil)
-	if err != nil {
-		return err
-	}
-	for k, v := range webBaseHeaders(fp, "", "") {
-		httpReq.Header.Set(k, v)
-	}
-	httpReq.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("gpt image2 web bootstrap: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 320))
-		return fmt.Errorf("gpt image2 web bootstrap %d: %s", resp.StatusCode, string(raw))
-	}
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 512*1024))
-	return nil
 }
 
 func (p *Provider) webRequirements(ctx context.Context, client *http.Client, base string, fp webFP, token string) (webRequirement, error) {
@@ -845,19 +897,28 @@ func (p *Provider) webRequirements(ctx context.Context, client *http.Client, bas
 	return webRequirement{Token: out.Token, ProofToken: proof, SOToken: out.SOToken}, nil
 }
 
-func (p *Provider) webPrepareImageConversation(ctx context.Context, client *http.Client, base string, fp webFP, token string, reqs webRequirement, prompt, modelSlug string, refs []webUploadMeta) (string, error) {
+func (p *Provider) webPrepareImageConversation(ctx context.Context, client *http.Client, base string, fp webFP, token string, reqs webRequirement, prompt, modelSlug, parentMessageID, messageID string, refs []webUploadMeta) (string, error) {
 	path := "/backend-api/f/conversation/prepare"
+	content, metadata := webImageMessageContent(prompt, refs)
+	partialQuery := map[string]any{
+		"id":      messageID,
+		"author":  map[string]string{"role": "user"},
+		"content": content,
+	}
+	if len(refs) > 0 {
+		partialQuery["metadata"] = metadata
+	}
 	body := map[string]any{
 		"action":                 "next",
 		"fork_from_shared_post":  false,
-		"parent_message_id":      "client-created-root",
+		"parent_message_id":      parentMessageID,
 		"model":                  modelSlug,
-		"client_prepare_state":   "none",
+		"client_prepare_state":   "success",
 		"timezone_offset_min":    -480,
 		"timezone":               "Asia/Shanghai",
 		"conversation_mode":      map[string]any{"kind": "primary_assistant"},
 		"system_hints":           []string{"picture_v2"},
-		"attachment_mime_types":  []string{"image/png"},
+		"partial_query":          partialQuery,
 		"supports_buffering":     true,
 		"supported_encodings":    []string{"v1"},
 		"client_contextual_info": map[string]any{"app_name": "chatgpt.com"},
@@ -886,22 +947,22 @@ func (p *Provider) webPrepareImageConversation(ctx context.Context, client *http
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return "", fmt.Errorf("gpt image2 web prepare decode: %w", err)
 	}
+	// 对齐 GoGPTImg：prepare 失败时可不带 conduit 继续（部分环境仍能通过 f/conversation）。
 	if out.ConduitToken == "" {
-		return "", fmt.Errorf("gpt image2 web prepare missing conduit token")
+		return "", nil
 	}
 	return out.ConduitToken, nil
 }
 
-func (p *Provider) webStartImageGeneration(ctx context.Context, client *http.Client, base string, fp webFP, token string, reqs webRequirement, conduit, prompt, modelSlug string, refs []webUploadMeta) (string, []string, []string, []string, string, error) {
+func (p *Provider) webStartImageGeneration(ctx context.Context, client *http.Client, base string, fp webFP, token string, reqs webRequirement, conduit, prompt, modelSlug, parentMessageID, messageID string, refs []webUploadMeta) (string, []string, []string, []string, string, error) {
 	path := "/backend-api/f/conversation"
 	content, metadata := webImageMessageContent(prompt, refs)
-	messageID := uuid.NewString()
 	body := map[string]any{
 		"action":                   "next",
 		"fork_from_shared_post":    false,
-		"parent_message_id":        "client-created-root",
+		"parent_message_id":        parentMessageID,
 		"model":                    modelSlug,
-		"client_prepare_state":     "success",
+		"client_prepare_state":     "sent",
 		"timezone_offset_min":      -480,
 		"timezone":                 "Asia/Shanghai",
 		"conversation_mode":        map[string]any{"kind": "primary_assistant"},
@@ -919,7 +980,7 @@ func (p *Provider) webStartImageGeneration(ctx context.Context, client *http.Cli
 		"messages": []map[string]any{{
 			"id":          messageID,
 			"author":      map[string]string{"role": "user"},
-			"create_time": time.Now().Unix(),
+			"create_time": float64(time.Now().UnixNano()) / float64(time.Second),
 			"content":     content,
 			"metadata":    metadata,
 		}},
@@ -999,14 +1060,35 @@ func (p *Provider) webPollImageResults(ctx context.Context, client *http.Client,
 		return nil, nil, nil, nil
 	}
 	deadline := time.Now().Add(timeout)
+	// 同步 ctx deadline：如果外层 ctx 比传入 timeout 更紧，按 ctx 走（少留 5s 给最后一次 GET）。
+	if ctxDL, ok := ctx.Deadline(); ok {
+		if adjusted := ctxDL.Add(-5 * time.Second); adjusted.Before(deadline) {
+			deadline = adjusted
+		}
+	}
 	var lastErr error
 	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return nil, nil, nil, ctx.Err()
+		}
 		fileIDs, sedimentIDs, directURLs, err := p.webConversationImageIDs(ctx, client, base, fp, token, conversationID, refs)
 		if err == nil && (len(fileIDs) > 0 || len(sedimentIDs) > 0 || len(directURLs) > 0) {
 			return fileIDs, sedimentIDs, directURLs, nil
 		}
 		lastErr = err
-		time.Sleep(4 * time.Second)
+		// 改成 ctx-aware sleep：剩余时间不够再睡时直接退出，免得 sleep 完才发现 deadline 已过。
+		sleepDur := 4 * time.Second
+		if rem := time.Until(deadline); rem > 0 && rem < sleepDur {
+			sleepDur = rem
+		}
+		if sleepDur <= 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, nil, nil, ctx.Err()
+		case <-time.After(sleepDur):
+		}
 	}
 	return nil, nil, nil, lastErr
 }
@@ -1386,15 +1468,20 @@ func strParam(p map[string]any, key, def string) string {
 }
 
 func (p *Provider) httpClient(proxyURL string) (*http.Client, error) {
-	if strings.TrimSpace(proxyURL) == "" {
-		return p.client, nil
-	}
-	return outbound.NewClient(outbound.Options{
+	proxyURL = strings.TrimSpace(proxyURL)
+	client, err := outbound.NewClient(outbound.Options{
 		ProxyURL: proxyURL,
 		Timeout:  defaultTimeout,
 		Mode:     outbound.ModeUTLS,
 		Profile:  outbound.ProfileChrome,
 	})
+	if err == nil {
+		return client, nil
+	}
+	if proxyURL == "" {
+		return p.client, nil
+	}
+	return nil, err
 }
 
 func firstStringParam(p map[string]any, keys ...string) string {
@@ -1433,6 +1520,21 @@ func shouldUseWebImage2(req *provider.Request) bool {
 		return false
 	}
 	return tier == "1K" || tier == "1"
+}
+
+func shouldUseNativeImage2(req *provider.Request) bool {
+	if req == nil {
+		return true
+	}
+	base := strings.TrimSpace(req.BaseURL)
+	if base == "" && req.Account != nil && req.Account.BaseURL != nil {
+		base = strings.TrimSpace(*req.Account.BaseURL)
+	}
+	if base == "" {
+		return true
+	}
+	base = strings.ToLower(strings.TrimRight(base, "/"))
+	return strings.Contains(base, "api.openai.com") || strings.Contains(base, "chatgpt.com") || isCodexBase(base)
 }
 
 func isGPTImage2(model string) bool {
@@ -1488,7 +1590,7 @@ func isCodexEndpoint(url string) bool {
 
 func userAgentForEndpoint(url string) string {
 	if isCodexEndpoint(url) {
-		return "codex-tui/0.118.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9 (codex-tui; 0.118.0)"
+		return codexCLIUserAgent
 	}
 	return "kleinai/1.0"
 }
@@ -2250,6 +2352,112 @@ func outputImagePayload(out responseOutputItem) (string, string) {
 	return "", ""
 }
 
+func extractCompatImageAssets(raw []byte, width, height int) []provider.Asset {
+	var payload any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil
+	}
+	vals := make([]string, 0, 4)
+	seen := map[string]struct{}{}
+	var walk func(parentKey string, v any)
+	walk = func(parentKey string, v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			for k, child := range x {
+				walk(strings.ToLower(strings.TrimSpace(k)), child)
+			}
+		case []any:
+			for _, child := range x {
+				walk(parentKey, child)
+			}
+		case string:
+			if asset := compatImageAssetValue(parentKey, x); asset != "" {
+				if _, ok := seen[asset]; ok {
+					return
+				}
+				seen[asset] = struct{}{}
+				vals = append(vals, asset)
+			}
+		}
+	}
+	walk("", payload)
+	if len(vals) == 0 {
+		return nil
+	}
+	assets := make([]provider.Asset, 0, len(vals))
+	for _, v := range vals {
+		mime := "image/png"
+		if strings.HasPrefix(v, "data:image/") {
+			if semi := strings.Index(v[len("data:"):], ";"); semi > 0 {
+				mime = v[len("data:") : len("data:")+semi]
+			}
+		}
+		assets = append(assets, provider.Asset{
+			URL:    v,
+			Width:  width,
+			Height: height,
+			Mime:   mime,
+		})
+	}
+	return assets
+}
+
+func compatImageAssetValue(parentKey, raw string) string {
+	key := strings.ToLower(strings.TrimSpace(parentKey))
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return ""
+	}
+	if strings.HasPrefix(v, "data:image/") {
+		return v
+	}
+	if inline := extractInlineImageURL(v); inline != "" {
+		switch key {
+		case "content", "text", "message", "output", "result":
+			return inline
+		}
+	}
+	if looksLikeHTTPURL(v) {
+		switch key {
+		case "url", "image", "image_url", "imageurl", "images", "data", "output", "result", "src", "href", "download_url", "media_url", "oss_url":
+			return v
+		}
+	}
+	if key == "b64_json" || key == "image_b64" || key == "result" {
+		if looksLikeBase64Image(v) {
+			return "data:image/png;base64," + v
+		}
+	}
+	return ""
+}
+
+func looksLikeHTTPURL(v string) bool {
+	u, err := url.Parse(v)
+	return err == nil && u != nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+func looksLikeBase64Image(v string) bool {
+	if len(v) < 32 || strings.ContainsAny(v, " \t\r\n") {
+		return false
+	}
+	if _, err := base64.StdEncoding.DecodeString(v); err == nil {
+		return true
+	}
+	if _, err := base64.RawStdEncoding.DecodeString(v); err == nil {
+		return true
+	}
+	return false
+}
+
+var inlineImageURLRe = regexp.MustCompile(`https?://[^\s<>()\]"]+\.(?:png|jpe?g|webp|gif|bmp)(?:\?[^\s<>()\]"]*)?`)
+
+func extractInlineImageURL(v string) string {
+	if m := inlineImageURLRe.FindString(v); m != "" {
+		return m
+	}
+	return ""
+}
+
 func parseCompletedResponse(r io.Reader) (*responseCompletedEvent, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
@@ -2319,10 +2527,12 @@ func parseCompletedResponse(r io.Reader) (*responseCompletedEvent, error) {
 			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("gpt image2 stream read: %w", err)
-	}
-	if err := flush(); err != nil {
+	streamErr := scanner.Err()
+	// 即便流中断（典型：HTTP/2 INTERNAL_ERROR / Cloudflare 流式超时），也要先 flush
+	// 已经收到的 data 块，看 partial_image 或 output_item.done 能否凑出可用结果。
+	// 这是关键：chatgpt 已经在跑，往往在被切断之前已经送过 1~2 张 partial（哪怕是低质量
+	// 中间帧），强过让 runTask 直接当失败重新走完整 retry 流程。
+	if err := flush(); err != nil && streamErr == nil {
 		return nil, fmt.Errorf("gpt image2 stream decode: %w", err)
 	}
 	if last == nil {
@@ -2333,6 +2543,11 @@ func parseCompletedResponse(r io.Reader) (*responseCompletedEvent, error) {
 	}
 	if len(last.Response.Output) == 0 && len(partialItems) > 0 {
 		last.Response.Output = partialItems
+	}
+	// 流中断 + 真的什么都没攒到 → 才往上报错让 runTask 走 retry / Adobe fallback。
+	// 流中断 + 已经有 output / partial → 当作"对端切了但我们已经看到结果"，返回成功。
+	if streamErr != nil && len(last.Response.Output) == 0 {
+		return nil, fmt.Errorf("gpt image2 stream read: %w", streamErr)
 	}
 	return last, nil
 }
@@ -2366,6 +2581,116 @@ func parseSize(size string) (int, int) {
 		h = 1024
 	}
 	return w, h
+}
+
+// normalizeImage2Size 把用户传来的 (size / resolution / aspect_ratio) 归一化到
+// gpt-image-2 (Codex) 实际接受的 8 个固定档位之一，并保证：
+//
+//   - 边长是 16 的倍数；
+//   - 最大边 ≤ 3840 px；
+//   - 总像素 ≤ 8,294,400；
+//   - 长短边比 ≤ 3:1。
+//
+// 优先级：
+//
+//  1. 显式 size="WxH" 命中固定档位 → 直接用；
+//  2. 否则按 (resolution=1K/2K/4K, aspect_ratio=1:1|3:2|2:3|16:9|9:16) 组合查表；
+//  3. 都没有 → 默认 1024×1024。
+func normalizeImage2Size(params map[string]any) string {
+	allowedTiers := map[string]struct{}{
+		"1024x1024": {}, "1536x1024": {}, "1024x1536": {},
+		"2048x2048": {}, "2048x1152": {}, "1152x2048": {},
+		"3840x2160": {}, "2160x3840": {},
+	}
+	raw := strings.ToLower(strings.TrimSpace(strParamAnyGPT(params, "size")))
+	if _, ok := allowedTiers[raw]; ok {
+		return raw
+	}
+	tier := strings.ToUpper(strings.TrimSpace(strParamAnyGPT(params, "resolution", "size_tier")))
+	ratio := strings.ToLower(strings.TrimSpace(strParamAnyGPT(params, "aspect_ratio", "ratio")))
+	if tier == "" {
+		tier = "1K"
+	}
+	if ratio == "" {
+		ratio = "1:1"
+	}
+	// 把 16:9 / 9:16 等 ratio 标准化（兼容 16x9 / 16_9 / 16-9 写法）
+	ratio = strings.NewReplacer("x", ":", "_", ":", "-", ":").Replace(ratio)
+	tierMap := map[string]map[string]string{
+		"1K": {"1:1": "1024x1024", "3:2": "1536x1024", "2:3": "1024x1536", "16:9": "1536x1024", "9:16": "1024x1536"},
+		"2K": {"1:1": "2048x2048", "3:2": "2048x1152", "2:3": "1152x2048", "16:9": "2048x1152", "9:16": "1152x2048"},
+		// 4K 没有 1:1（3840×3840 总像素超 14M，超 OpenAI 8.29M 上限），1:1 退到 2K square
+		"4K": {"1:1": "2048x2048", "3:2": "3840x2160", "2:3": "2160x3840", "16:9": "3840x2160", "9:16": "2160x3840"},
+	}
+	if t, ok := tierMap[tier]; ok {
+		if v, ok := t[ratio]; ok {
+			return v
+		}
+		// ratio 没命中按 1:1 回退
+		if v, ok := t["1:1"]; ok {
+			return v
+		}
+	}
+	return "1024x1024"
+}
+
+// strParamAnyGPT 是 generation_service.strParamAny 的本地版本，避免 import cycle。
+func strParamAnyGPT(p map[string]any, keys ...string) string {
+	if p == nil {
+		return ""
+	}
+	for _, k := range keys {
+		if v, ok := p[k]; ok {
+			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	return ""
+}
+
+// probeImageDimsFromDataURL 把 "data:image/png;base64,..." / "data:image/webp;base64,..."
+// 等 dataURL 解出来，按容器格式读 width × height：
+//
+//	PNG : IHDR chunk 位于偏移 16，前 4B 是 width，后 4B 是 height（big-endian）。
+//	WebP: VP8/VP8L/VP8X 三种容器，简化只处理 VP8X（其余落回 fallback）。
+//
+// 没匹配上就回 (fallbackW, fallbackH)。Adobe / GPT web 实际返图的真实尺寸跟我们
+// 请求里写的 size 经常对不上（GPT web 1K 1024² → 上游回 1254² 之类），这里读真实
+// 像素是为了让 generation_result.width / height metadata 与磁盘 PNG 一致。
+func probeImageDimsFromDataURL(dataURL string, fallbackW, fallbackH int) (int, int) {
+	const prefix = "data:"
+	if !strings.HasPrefix(dataURL, prefix) {
+		return fallbackW, fallbackH
+	}
+	idx := strings.Index(dataURL, ",")
+	if idx < 0 {
+		return fallbackW, fallbackH
+	}
+	raw, err := base64.StdEncoding.DecodeString(dataURL[idx+1:])
+	if err != nil || len(raw) < 24 {
+		return fallbackW, fallbackH
+	}
+	// PNG: 89 50 4E 47 0D 0A 1A 0A，IHDR 在第 16 字节起。
+	if len(raw) >= 24 && raw[0] == 0x89 && raw[1] == 'P' && raw[2] == 'N' && raw[3] == 'G' {
+		w := int(binary.BigEndian.Uint32(raw[16:20]))
+		h := int(binary.BigEndian.Uint32(raw[20:24]))
+		if w > 0 && h > 0 {
+			return w, h
+		}
+	}
+	// WebP VP8X: 'RIFF' .... 'WEBPVP8X' (offset 12..16='WEBP', 16..20='VP8X')，
+	// canvas size 在偏移 24 处（3B width LE +1, 3B height LE +1）。
+	if len(raw) >= 30 && string(raw[0:4]) == "RIFF" && string(raw[8:12]) == "WEBP" {
+		if string(raw[12:16]) == "VP8X" {
+			w := int(raw[24]) | int(raw[25])<<8 | int(raw[26])<<16 + 1
+			h := int(raw[27]) | int(raw[28])<<8 | int(raw[29])<<16 + 1
+			if w > 0 && h > 0 {
+				return w, h
+			}
+		}
+	}
+	return fallbackW, fallbackH
 }
 
 func snippet(b []byte, n int) string {

@@ -3,27 +3,39 @@ package dto
 
 // CreateImageReq 创建生图任务。
 type CreateImageReq struct {
-	ModelCode string         `json:"model"        binding:"required,max=64"`
-	Prompt    string         `json:"prompt"       binding:"required,min=1,max=4000"`
-	NegPrompt string         `json:"neg_prompt"   binding:"omitempty,max=4000"`
-	Mode      string         `json:"mode"         binding:"omitempty,oneof=t2i i2i"`
-	Count     int            `json:"count"        binding:"omitempty,min=1,max=4"`
-	Ratio     string         `json:"ratio"        binding:"omitempty"`
-	Quality   string         `json:"quality"      binding:"omitempty,oneof=draft standard hd"`
-	RefAssets []string       `json:"ref_assets"   binding:"omitempty"`
-	Params    map[string]any `json:"params"       binding:"omitempty"`
+	ModelCode   string         `json:"model"        binding:"required,max=64"`
+	Prompt      string         `json:"prompt"       binding:"required,min=1,max=4000"`
+	NegPrompt   string         `json:"neg_prompt"   binding:"omitempty,max=4000"`
+	Mode        string         `json:"mode"         binding:"omitempty,oneof=t2i i2i"`
+	Count       int            `json:"count"        binding:"omitempty,min=1,max=4"`
+	Ratio       string         `json:"ratio"        binding:"omitempty"`
+	Quality     string         `json:"quality"      binding:"omitempty,oneof=draft standard hd"`
+	RefAssets   []string       `json:"ref_assets"   binding:"omitempty"`
+	Params      map[string]any `json:"params"       binding:"omitempty"`
+	CallbackURL string         `json:"callback_url" binding:"omitempty,max=2048"`
 }
 
 // CreateVideoReq 创建生视频任务。
 type CreateVideoReq struct {
-	ModelCode string         `json:"model"        binding:"required,max=64"`
-	Prompt    string         `json:"prompt"       binding:"required,min=1,max=4000"`
-	Mode      string         `json:"mode"         binding:"omitempty,oneof=t2v i2v"`
-	Duration  int            `json:"duration"     binding:"omitempty,min=2,max=60"`
-	Ratio     string         `json:"ratio"        binding:"omitempty"`
-	Quality   string         `json:"quality"      binding:"omitempty,oneof=draft standard hd"`
-	RefAssets []string       `json:"ref_assets"   binding:"omitempty"`
-	Params    map[string]any `json:"params"       binding:"omitempty"`
+	ModelCode    string         `json:"model"        binding:"required,max=64"`
+	Prompt       string         `json:"prompt"       binding:"required,min=1,max=4000"`
+	Mode         string         `json:"mode"         binding:"omitempty,oneof=t2v i2v"`
+	Duration     int            `json:"duration"     binding:"omitempty,min=2,max=60"`
+	Ratio        string         `json:"ratio"        binding:"omitempty"`
+	Resolution   string         `json:"resolution"   binding:"omitempty,max=32"`
+	Quality      string         `json:"quality"      binding:"omitempty,oneof=draft standard hd"`
+	ReferenceFit string         `json:"reference_fit" binding:"omitempty,oneof=cover contain stretch"`
+	RefAssets    []string       `json:"ref_assets"   binding:"omitempty"`
+	Params       map[string]any `json:"params"       binding:"omitempty"`
+	CallbackURL  string         `json:"callback_url" binding:"omitempty,max=2048"`
+}
+
+// CreateMusicReq 创建音乐/歌曲生成任务（FlowMusic）。
+type CreateMusicReq struct {
+	ModelCode   string         `json:"model"        binding:"omitempty,max=64"`
+	Prompt      string         `json:"prompt"       binding:"required,min=1,max=4000"`
+	Params      map[string]any `json:"params"       binding:"omitempty"`
+	CallbackURL string         `json:"callback_url" binding:"omitempty,max=2048"`
 }
 
 // CreateTextReq 创建文字创作任务。
@@ -46,23 +58,28 @@ type TextGenerationResp struct {
 
 // GenerationTaskResp 任务响应（精简）。
 type GenerationTaskResp struct {
-	TaskID     string                 `json:"task_id"`
-	Kind       string                 `json:"kind"`
-	Status     int8                   `json:"status"`
-	Progress   int8                   `json:"progress"`
-	ModelCode  string                 `json:"model"`
-	Prompt     string                 `json:"prompt,omitempty"`
-	CostPoints int64                  `json:"cost_points"`
-	Error      string                 `json:"error,omitempty"`
-	Results    []GenerationResultResp `json:"results,omitempty"`
-	CreatedAt  int64                  `json:"created_at"`
+	TaskID      string                 `json:"task_id"`
+	Kind        string                 `json:"kind"`
+	Status      int8                   `json:"status"`
+	Progress    int8                   `json:"progress"`
+	RetryAfter  int                    `json:"retry_after,omitempty"`
+	ModelCode   string                 `json:"model"`
+	Prompt      string                 `json:"prompt,omitempty"`
+	CostPoints  int64                  `json:"cost_points"`
+	Error       string                 `json:"error,omitempty"`
+	Resolution  string                 `json:"resolution,omitempty"`
+	AspectRatio string                 `json:"aspect_ratio,omitempty"`
+	Results     []GenerationResultResp `json:"results,omitempty"`
+	CreatedAt   int64                  `json:"created_at"`
 }
 
 // GenerationResultResp 单条结果。
 type GenerationResultResp struct {
-	URL        string `json:"url"`
-	ThumbURL   string `json:"thumb_url,omitempty"`
-	Width      int    `json:"width,omitempty"`
-	Height     int    `json:"height,omitempty"`
-	DurationMs int    `json:"duration_ms,omitempty"`
+	URL         string `json:"url"`
+	ThumbURL    string `json:"thumb_url,omitempty"`
+	Width       int    `json:"width,omitempty"`
+	Height      int    `json:"height,omitempty"`
+	DurationMs  int    `json:"duration_ms,omitempty"`
+	Resolution  string `json:"resolution,omitempty"`
+	AspectRatio string `json:"aspect_ratio,omitempty"`
 }

@@ -16,7 +16,8 @@ const VIDEO_MODELS = [
   { code: 'vid-i2v', name: 'GROK 图生视频 V1', cost: 20 },
 ];
 
-const DURATIONS = [6, 10] as const;
+// 见 CreateStudioPage.tsx VIDEO_DURATIONS：20s/30s 走后端 extension 链。
+const DURATIONS = [6, 10, 20, 30] as const;
 const RATIOS = ['16:9', '9:16', '1:1'] as const;
 const QUALITY = [
   { value: 'standard', label: '标准' },

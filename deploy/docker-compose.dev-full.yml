@@ -30,8 +30,10 @@ x-backend-env: &backend-env
   KLEIN_JWT_ACCESS_TTL: 2h
   KLEIN_JWT_REFRESH_TTL: 336h
   KLEIN_AES_KEY: '00000000000000000000000000000000'
-  KLEIN_PROVIDER_GPT: mock
-  KLEIN_PROVIDER_GROK: mock
+  KLEIN_PROVIDER_GPT: real
+  KLEIN_PROVIDER_GROK: real
+  KLEIN_PROVIDER_ADOBE: real
+  KLEIN_PROVIDER_PIC2API: real
   KLEIN_OPENAI_BASE: https://api.openai.com
   KLEIN_GROK_BASE: https://api.x.ai
   KLEIN_GPT_BASE_URL: https://api.openai.com
@@ -104,6 +106,8 @@ services:
       - "127.0.0.1:17180:17180"
     volumes:
       - klein-logs:/app/logs
+      # 持久化生成的图片/视频文件，容器 force-recreate 不丢素材；admin 端要从同一卷读
+      - klein-storage:/app/storage
     depends_on:
       mysql: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -122,8 +126,14 @@ services:
       - "127.0.0.1:17188:17188"
     volumes:
       - klein-logs:/app/logs
+      # admin 后台预览图片要从和 api 一样的存储卷读，否则 /admin/api/v1/gen/cached/* 取不到文件
+      - klein-storage:/app/storage
+    # 直接等 mysql + redis healthy，不要只等 api started。否则 host 重启时
+    # 三个 backend 同时起、mysql 还在初始化，admin 会一次失败立刻进 degraded mode
+    # （只剩 /ping，所有真路由 404）。bootstrap 里也加了 60s 退避重试做兜底。
     depends_on:
-      api: { condition: service_started }
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
     networks: [klein-dev]
     restart: unless-stopped
 
@@ -139,8 +149,10 @@ services:
       - "127.0.0.1:17200:17200"
     volumes:
       - klein-logs:/app/logs
+      - klein-storage:/app/storage
     depends_on:
-      api: { condition: service_started }
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
     networks: [klein-dev]
     restart: unless-stopped
 
@@ -154,6 +166,7 @@ services:
       KLEIN_NODE_ID: '4'
     volumes:
       - klein-logs:/app/logs
+      - klein-storage:/app/storage
     depends_on:
       mysql: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -194,6 +207,7 @@ volumes:
   klein-mysql-dev-data:
   klein-redis-dev-data:
   klein-logs:
+  klein-storage:
 
 networks:
   klein-dev:

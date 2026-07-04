@@ -31,6 +31,37 @@ func RateLimitUser(limiter *ratelimit.Limiter, ratePerMin int) gin.HandlerFunc {
 	}
 }
 
+// RateLimitAPIKey OpenAI 兼容 API Key 限流（依赖 AuthAPIKey 在前）。
+func RateLimitAPIKey(limiter *ratelimit.Limiter, ratePerMin int) gin.HandlerFunc {
+	return RateLimitAPIKeyNamed(limiter, "default", ratePerMin)
+}
+
+// RateLimitAPIKeyNamed OpenAI API Key 分桶限流。
+// bucket 用于把创建任务和查询任务状态拆开计数，避免高频轮询挤占创建额度。
+func RateLimitAPIKeyNamed(limiter *ratelimit.Limiter, bucket string, ratePerMin int) gin.HandlerFunc {
+	return RateLimitAPIKeyDynamic(limiter, bucket, func(*gin.Context) int { return ratePerMin })
+}
+
+// RateLimitAPIKeyDynamic 与 RateLimitAPIKeyNamed 相同，但每个请求动态读取限流值。
+func RateLimitAPIKeyDynamic(limiter *ratelimit.Limiter, bucket string, rateFn func(*gin.Context) int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		k := APIKeyFromCtx(c)
+		if k == nil {
+			c.Next()
+			return
+		}
+		if bucket == "" {
+			bucket = "default"
+		}
+		ratePerMin := 0
+		if rateFn != nil {
+			ratePerMin = rateFn(c)
+		}
+		key := "ratelimit:apikey:" + bucket + ":" + strconv.FormatUint(k.ID, 10)
+		applyLimit(c, limiter, key, ratePerMin)
+	}
+}
+
 func applyLimit(c *gin.Context, limiter *ratelimit.Limiter, key string, ratePerMin int) {
 	if ratePerMin <= 0 {
 		c.Next()

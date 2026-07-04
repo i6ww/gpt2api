@@ -47,3 +47,32 @@ Thumbs.db
 
 # 大图素材原档（按需）
 /assets/raw/
+
+# ===== 隐私 / 运维临时产物：绝不入仓 =====
+# SSH / TLS 私钥、证书、可执行文件
+*.pem
+*.key
+*.exe
+key.pem
+
+# 部署/诊断脚本临时目录（含服务器密码、密钥、token、导出的账号数据）
+.deploy-tmp/
+.tools/
+agent-tools/
+cpa-lab/
+output/
+
+# 账号/登录凭据导出
+xai_login*.json
+xai-accounts.json
+sub2api-account*.json
+**/refreshed_accounts.json
+
+# 根目录 & 子目录的临时排查文件（SQL 查询、抓包、部署输出等）
+/_*
+/tmp_*
+/response-headers.txt
+/*.har
+backend/scripts/_*
+deploy/mysql-init/_*
+**/_admin_token.txt

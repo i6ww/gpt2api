@@ -1,4 +1,7 @@
 import clsx from 'clsx';
+import { Sparkles } from 'lucide-react';
+
+const BRAND_NAME = 'AI一站式·创意生成';
 
 interface LogoProps {
   size?: 'sm' | 'md' | 'lg';
@@ -7,27 +10,40 @@ interface LogoProps {
   className?: string;
 }
 
-const SIZE: Record<NonNullable<LogoProps['size']>, { icon: number; text: string }> = {
-  sm: { icon: 24, text: 'text-small' },
-  md: { icon: 30, text: 'text-h4' },
-  lg: { icon: 40, text: 'text-h3' },
+const SIZE: Record<
+  NonNullable<LogoProps['size']>,
+  { box: number; icon: number; text: string }
+> = {
+  sm: { box: 28, icon: 16, text: 'text-small' },
+  md: { box: 34, icon: 20, text: 'text-h4' },
+  lg: { box: 44, icon: 24, text: 'text-h3' },
 };
 
 export function Logo({ size = 'md', iconOnly = false, suffix, className }: LogoProps) {
   const cfg = SIZE[size];
-
   return (
-    <div className={clsx('flex min-w-0 select-none items-center gap-2', className)}>
+    <div className={clsx('flex items-center gap-2 select-none min-w-0', className)}>
       <span
-        className="grid shrink-0 place-items-center rounded-xl bg-neutral-950 font-semibold text-white"
-        style={{ width: cfg.icon, height: cfg.icon }}
+        aria-label={BRAND_NAME}
+        title={BRAND_NAME}
+        style={{ height: cfg.box, width: cfg.box }}
+        className="grid shrink-0 place-items-center rounded-lg bg-klein-gradient text-white shadow-glow-soft"
       >
-        AI
+        <Sparkles size={cfg.icon} strokeWidth={2.2} />
       </span>
       {!iconOnly && (
-        <span className={clsx(cfg.text, 'leading-none font-medium tracking-tight text-text-primary')}>
-          Studio
-          {suffix && <span className="ml-2 align-middle text-tiny font-medium text-text-tertiary">{suffix}</span>}
+        <span
+          className={clsx(
+            cfg.text,
+            'font-semibold tracking-tight text-text-primary leading-none',
+          )}
+        >
+          {BRAND_NAME}
+          {suffix && (
+            <span className="ml-2 align-middle text-tiny font-medium text-text-tertiary">
+              {suffix}
+            </span>
+          )}
         </span>
       )}
     </div>

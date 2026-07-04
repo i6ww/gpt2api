@@ -1,13 +1,25 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="en" data-theme="light">
   <head>
     <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/logo-icon.svg?v=20260508" />
+    <link rel="apple-touch-icon" href="/logo-icon.svg?v=20260508" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#002FA7" />
-    <title>Studio 创意生成</title>
+    <title>AI Creative Studio · All-in-One</title>
+    <script>
+      (function () {
+        try {
+          var lng = (localStorage.getItem('klein.lang') || '').toLowerCase();
+          var isZh = lng.indexOf('zh') === 0;
+          document.documentElement.lang = isZh ? 'zh-CN' : 'en';
+          document.title = isZh ? 'AI一站式·创意生成' : 'AI Creative Studio · All-in-One';
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
-</html>
+ </html>

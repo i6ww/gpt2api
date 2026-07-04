@@ -154,21 +154,6 @@ func (h *AdminAccountHandler) BatchDelete(c *gin.Context) {
 	response.OK(c, dto.AccountBulkOpResult{Deleted: n})
 }
 
-// BatchAssignProxy POST /admin/api/v1/accounts/batch-assign-proxy
-func (h *AdminAccountHandler) BatchAssignProxy(c *gin.Context) {
-	var req dto.AccountBatchAssignProxyReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Fail(c, errcode.InvalidParam.Wrap(err))
-		return
-	}
-	res, err := h.svc.BatchAssignProxy(c.Request.Context(), &req)
-	if err != nil {
-		response.Fail(c, err)
-		return
-	}
-	response.OK(c, res)
-}
-
 // Purge POST /admin/api/v1/accounts/purge
 func (h *AdminAccountHandler) Purge(c *gin.Context) {
 	var req dto.AccountPurgeReq
@@ -229,6 +214,21 @@ func (h *AdminAccountHandler) RefreshOAuth(c *gin.Context) {
 		return
 	}
 	res, err := h.svc.RefreshOAuth(c.Request.Context(), id)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, res)
+}
+
+// SyncModels POST /admin/api/v1/accounts/:id/models
+func (h *AdminAccountHandler) SyncModels(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Fail(c, errcode.InvalidParam)
+		return
+	}
+	res, err := h.svc.SyncModels(c.Request.Context(), id)
 	if err != nil {
 		response.Fail(c, err)
 		return

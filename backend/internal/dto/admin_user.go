@@ -1,11 +1,11 @@
-package dto
+﻿package dto
 
 // AdminUserListReq is the admin-side user list query.
 type AdminUserListReq struct {
 	Keyword  string `form:"keyword" binding:"omitempty,max=128"`
 	Status   *int   `form:"status" binding:"omitempty,oneof=0 1"`
 	Page     int    `form:"page" binding:"omitempty,min=1"`
-	PageSize int    `form:"page_size" binding:"omitempty,min=1,max=200"`
+	PageSize int    `form:"page_size" binding:"omitempty,min=1,max=10000"`
 }
 
 type AdminUserResp struct {

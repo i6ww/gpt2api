@@ -33,7 +33,7 @@ export function Toaster() {
             )}
           >
             <Icon size={18} className="shrink-0 mt-0.5" />
-            <p className="flex-1 text-small text-text-primary leading-loose break-all">{t.msg}</p>
+            <p className="flex-1 text-small text-text-primary leading-loose break-all whitespace-pre-line">{t.msg}</p>
             <button
               aria-label="关闭"
               className="text-text-tertiary hover:text-text-primary transition"

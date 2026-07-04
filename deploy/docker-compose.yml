@@ -14,6 +14,12 @@ x-common-env: &common-env
   KLEIN_AES_KEY: ${KLEIN_AES_KEY}
   KLEIN_OPENAI_BASE: ${KLEIN_OPENAI_BASE:-https://api.openai.com}
   KLEIN_GROK_BASE: ${KLEIN_GROK_BASE:-https://api.x.ai}
+  KLEIN_PROVIDER_GPT: ${KLEIN_PROVIDER_GPT:-real}
+  KLEIN_PROVIDER_GROK: ${KLEIN_PROVIDER_GROK:-real}
+  KLEIN_PROVIDER_PIC2API: ${KLEIN_PROVIDER_PIC2API:-real}
+  KLEIN_GPT_BASE_URL: ${KLEIN_GPT_BASE_URL:-https://api.openai.com}
+  KLEIN_GROK_BASE_URL: ${KLEIN_GROK_BASE_URL:-https://api.x.ai}
+  KLEIN_PIC2API_BASE_URL: ${KLEIN_PIC2API_BASE_URL:-https://pic2api.com}
   KLEIN_CORS_ORIGINS: ${KLEIN_CORS_ORIGINS}
   KLEIN_LOG_DIR: /app/logs
   TZ: Asia/Shanghai
@@ -28,7 +34,7 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
       - --innodb-buffer-pool-size=2G
-      - --max_connections=300
+      - --max_connections=700
       - --sql-mode=STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION
     environment:
       MYSQL_ROOT_PASSWORD: ${KLEIN_MYSQL_ROOT_PASSWORD}
@@ -77,13 +83,10 @@ services:
     expose: ["17180"]
     volumes:
       - klein-logs:/app/logs
+      - klein-storage:/app/storage
     depends_on:
       mysql:  { condition: service_healthy }
       redis:  { condition: service_healthy }
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:17180/healthz | grep -q ok || exit 1"]
-      interval: 15s
-      retries: 5
     deploy:
       resources:
         limits: { cpus: '2', memory: 1G }
@@ -100,6 +103,7 @@ services:
     expose: ["17188"]
     volumes:
       - klein-logs:/app/logs
+      - klein-storage:/app/storage
     depends_on:
       mysql:  { condition: service_healthy }
       redis:  { condition: service_healthy }
@@ -119,6 +123,7 @@ services:
     expose: ["17200"]
     volumes:
       - klein-logs:/app/logs
+      - klein-storage:/app/storage
     depends_on:
       mysql:  { condition: service_healthy }
       redis:  { condition: service_healthy }
@@ -137,6 +142,7 @@ services:
       KLEIN_NODE_ID: 4
     volumes:
       - klein-logs:/app/logs
+      - klein-storage:/app/storage
     depends_on:
       mysql:  { condition: service_healthy }
       redis:  { condition: service_healthy }
@@ -182,8 +188,13 @@ services:
 
 volumes:
   klein-mysql-data:
+    external: true
+    name: deploy_klein8001-mysql-data
   klein-redis-data:
   klein-logs:
+  klein-storage:
+    external: true
+    name: deploy_klein8001-storage
 
 networks:
   klein:

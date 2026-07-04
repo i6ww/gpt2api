@@ -26,6 +26,11 @@ const (
 	ModeUTLS     = "utls"
 
 	ProfileChrome = "chrome"
+	// ProfileSafari / ProfileIOS 用 iOS Safari 的 TLS ClientHello（移动端指纹）。
+	// Adobe 2026Q2 起对「头是 iOS、握手是 Chrome」的不一致指纹会反爬伪装成 408，
+	// 故 Adobe 走移动端时需要 TLS 也切到 iOS。
+	ProfileSafari = "safari"
+	ProfileIOS    = "ios"
 )
 
 // Options describes one outbound client.
@@ -230,6 +235,8 @@ func (t *utlsTransport) clientHelloID() utls.ClientHelloID {
 	switch t.profile {
 	case ProfileChrome, "":
 		return utls.HelloChrome_133
+	case ProfileIOS, ProfileSafari:
+		return utls.HelloIOS_14
 	default:
 		return utls.HelloChrome_133
 	}

@@ -65,9 +65,11 @@ export class ApiError extends Error {
 const baseURL =
   (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, '') ?? '/api/v1';
 
+const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
+
 export const api: AxiosInstance = axios.create({
   baseURL,
-  timeout: 30_000,
+  timeout: REQUEST_TIMEOUT_MS,
   headers: { Accept: 'application/json' },
 });
 
@@ -95,6 +97,7 @@ api.interceptors.response.use(
   (err: AxiosError<ApiBody<unknown>>) => {
     const status = err.response?.status;
     const body = err.response?.data;
+    const timedOut = err.code === 'ECONNABORTED' || /timeout/i.test(err.message ?? '');
     const msg = body?.msg ?? friendlyHttpError(status, err.message);
     const code = body?.code ?? status ?? -1;
     if (status === 401) {
@@ -102,7 +105,11 @@ api.interceptors.response.use(
       unauthorizedHandler?.();
     }
     return Promise.reject(
-      new ApiError(msg, code, { httpStatus: status, traceId: body?.trace_id }),
+      new ApiError(
+        timedOut ? 'Request timed out, please retry later or use async mode for long-running jobs.' : msg,
+        code,
+        { httpStatus: status, traceId: body?.trace_id },
+      ),
     );
   },
 );

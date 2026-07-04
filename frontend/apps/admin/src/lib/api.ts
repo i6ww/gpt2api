@@ -64,9 +64,11 @@ const baseURL =
   (import.meta.env.VITE_ADMIN_BASE_URL as string | undefined)?.replace(/\/+$/, '') ??
   '/admin/api/v1';
 
+const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
+
 export const api: AxiosInstance = axios.create({
   baseURL,
-  timeout: 30_000,
+  timeout: REQUEST_TIMEOUT_MS,
   headers: { Accept: 'application/json' },
 });
 
@@ -94,6 +96,7 @@ api.interceptors.response.use(
   (err: AxiosError<ApiBody<unknown>>) => {
     const status = err.response?.status;
     const body = err.response?.data;
+    const timedOut = err.code === 'ECONNABORTED' || /timeout/i.test(err.message ?? '');
     const msg = body?.msg ?? err.message ?? '网络异常';
     const code = body?.code ?? status ?? -1;
     if (status === 401) {
@@ -101,7 +104,11 @@ api.interceptors.response.use(
       unauthorizedHandler?.();
     }
     return Promise.reject(
-      new ApiError(msg, code, { httpStatus: status, traceId: body?.trace_id }),
+      new ApiError(
+        timedOut ? 'Request timed out, please retry later or use async mode for long-running jobs.' : msg,
+        code,
+        { httpStatus: status, traceId: body?.trace_id },
+      ),
     );
   },
 );
@@ -110,4 +117,12 @@ api.interceptors.response.use(
 export async function request<T = unknown>(cfg: AxiosRequestConfig): Promise<T> {
   const res = await api.request<ApiBody<T>>(cfg);
   return (res.data?.data ?? (undefined as unknown)) as T;
+}
+
+/**
+ * 不解构 data 的原始请求；用于下载、二进制、text/plain 等不走 ApiBody 包装的端点。
+ * 调用方拿到完整 AxiosResponse 自行处理 res.data / headers。
+ */
+export async function requestRaw<T = unknown>(cfg: AxiosRequestConfig) {
+  return api.request<T>(cfg);
 }

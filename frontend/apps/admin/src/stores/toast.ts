@@ -22,9 +22,13 @@ export const useToastStore = create<ToastState>((set) => ({
   push: (kind, msg) => {
     const id = _seq++;
     set((s) => ({ items: [...s.items, { id, kind, msg }] }));
+    // error 默认更长，长文本进一步加时长以便阅读
+    const base = kind === 'error' ? 6000 : 3500;
+    const extra = Math.min(8000, Math.max(0, msg.length - 40) * 60);
+    const ttl = base + extra;
     setTimeout(() => {
       set((s) => ({ items: s.items.filter((t) => t.id !== id) }));
-    }, 3500);
+    }, ttl);
   },
   dismiss: (id) => set((s) => ({ items: s.items.filter((t) => t.id !== id) })),
 }));

@@ -50,6 +50,25 @@ func (h *APIKeyHandler) List(c *gin.Context) {
 	response.OK(c, gin.H{"list": items})
 }
 
+// Stats GET /api/v1/keys/stats?since=<unix>&until=<unix>
+//
+// 按时间窗口聚合用户每把 Key 的调用次数 / 消费点数。前端时间筛选下拉
+// （今日 / 7d / 30d / 全部 / 自定义）通过这个接口拉。
+func (h *APIKeyHandler) Stats(c *gin.Context) {
+	var req dto.APIKeyStatsReq
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.Fail(c, errcode.InvalidParam.Wrap(err))
+		return
+	}
+	uid := middleware.MustUID(c)
+	resp, err := h.svc.Stats(c.Request.Context(), uid, &req)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, resp)
+}
+
 // Toggle POST /api/v1/keys/:id/toggle?enable=1
 func (h *APIKeyHandler) Toggle(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)

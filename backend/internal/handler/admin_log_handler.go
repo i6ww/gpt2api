@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,19 +16,38 @@ import (
 	"github.com/kleinai/backend/internal/dto"
 	"github.com/kleinai/backend/internal/model"
 	"github.com/kleinai/backend/internal/repo"
+	"github.com/kleinai/backend/internal/service"
 	"github.com/kleinai/backend/pkg/crypto"
 	"github.com/kleinai/backend/pkg/errcode"
 	"github.com/kleinai/backend/pkg/response"
 )
 
 type AdminLogHandler struct {
-	gen *repo.GenerationRepo
-	acc *repo.AccountRepo
-	aes *crypto.AESGCM
+	gen     *repo.GenerationRepo
+	acc     *repo.AccountRepo
+	aes     *crypto.AESGCM
+	cluster *service.ClusterService // 可选；管理端预览也走集群 302
+	genSvc  *service.GenerationService
 }
 
 func NewAdminLogHandler(gen *repo.GenerationRepo, acc *repo.AccountRepo, aes *crypto.AESGCM) *AdminLogHandler {
 	return &AdminLogHandler{gen: gen, acc: acc, aes: aes}
+}
+
+// SetClusterService 注入集群服务（可选）。
+func (h *AdminLogHandler) SetClusterService(c *service.ClusterService) {
+	if h == nil {
+		return
+	}
+	h.cluster = c
+}
+
+// SetGenerationService 注入生成服务，用于管理端手动回收卡住任务。
+func (h *AdminLogHandler) SetGenerationService(s *service.GenerationService) {
+	if h == nil {
+		return
+	}
+	h.genSvc = s
 }
 
 func (h *AdminLogHandler) GenerationLogs(c *gin.Context) {
@@ -60,6 +80,7 @@ func (h *AdminLogHandler) GenerationLogs(c *gin.Context) {
 			Status:     r.Status,
 			CostPoints: r.CostPoints,
 		}
+		item.Resolution, item.AspectRatio = generationDisplayAttrs(r.Kind, r.Params, r.ResultMeta, r.Width, r.Height)
 		if r.APIKeyID != nil {
 			item.APIKeyID = *r.APIKeyID
 		}
@@ -70,7 +91,10 @@ func (h *AdminLogHandler) GenerationLogs(c *gin.Context) {
 			item.DurationMs = *r.DurationMs
 		}
 		if r.PreviewURL != nil && *r.PreviewURL != "" {
-			item.PreviewURL = fmt.Sprintf("/admin/api/v1/logs/generations/%s/preview", r.TaskID)
+			item.PreviewURL = adminPreviewURLFromRaw(r.TaskID, r.Kind, *r.PreviewURL)
+		}
+		if r.AssetURL != nil && *r.AssetURL != "" {
+			item.AssetURL = adminPreviewURLFromRaw(r.TaskID, r.Kind, *r.AssetURL)
 		}
 		if r.Error != nil {
 			item.Error = *r.Error
@@ -85,6 +109,49 @@ func (h *AdminLogHandler) GenerationLogs(c *gin.Context) {
 		pageSize = 20
 	}
 	response.Page(c, out, total, page, pageSize)
+}
+
+func (h *AdminLogHandler) CleanupStuckGenerations(c *gin.Context) {
+	if h.genSvc == nil {
+		response.Fail(c, errcode.ResourceMissing.WithMsg("生成任务清理服务未启用"))
+		return
+	}
+	var req dto.AdminGenerationStuckCleanupReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, errcode.InvalidParam.Wrap(err))
+		return
+	}
+	if req.MinAgeMinutes <= 0 {
+		req.MinAgeMinutes = 10
+	}
+	cleaned, err := h.genSvc.ReapStuckRunningTasks(c.Request.Context(), time.Duration(req.MinAgeMinutes)*time.Minute, 200)
+	if err != nil {
+		response.Fail(c, errcode.DBError.Wrap(err))
+		return
+	}
+	response.OK(c, dto.AdminGenerationStuckCleanupResp{Cleaned: cleaned})
+}
+
+// adminPreviewURLFromRaw 把数据库里 generation_result 表的原始 URL（可能是 /api/v1/gen/cached/...、
+// 也可能是 assets.grok.com 之类的远程 URL）翻译成 admin 侧能直接 <img src=> 加载的相对路径。
+// 与用户端 generationResultURL 的规则保持一致，只是前缀换成 /admin/api/v1/gen/。
+func adminPreviewURLFromRaw(taskID, kind, raw string) string {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return ""
+	}
+	if strings.HasPrefix(v, "data:") {
+		return v
+	}
+	if strings.HasPrefix(v, "/api/v1/gen/cached/") {
+		return "/admin" + v
+	}
+	thumb := kind != "video"
+	u := fmt.Sprintf("/admin/api/v1/gen/assets/%s/0", taskID)
+	if thumb {
+		u += "?thumb=1"
+	}
+	return u
 }
 
 func (h *AdminLogHandler) GenerationUpstreamLogs(c *gin.Context) {
@@ -133,32 +200,51 @@ func (h *AdminLogHandler) GenerationUpstreamLogs(c *gin.Context) {
 	response.OK(c, out)
 }
 
-// GenerationPreview proxies a request-log preview through the admin origin.
-func (h *AdminLogHandler) GenerationPreview(c *gin.Context) {
+// GenCachedAsset 提供 /admin/api/v1/gen/cached/*path —— 把 KLEIN_STORAGE_ROOT 下的
+// 本地图片/视频对管理后台开放。与 /api/v1/gen/cached/* 行为一致，URL 形态对齐。
+func (h *AdminLogHandler) GenCachedAsset(c *gin.Context) {
+	rel := strings.TrimLeft(c.Param("path"), "/")
+	if rel == "" || strings.Contains(rel, "..") {
+		response.Fail(c, errcode.InvalidParam.WithMsg("invalid asset path"))
+		return
+	}
+	if h.cluster != nil {
+		kind := model.AssetKindGen
+		if strings.Contains(rel, "_thumb") {
+			kind = model.AssetKindThumb
+		}
+		if u, _, err := h.cluster.ResolveDownload(c.Request.Context(), kind, rel); err == nil && u != "" {
+			c.Redirect(http.StatusFound, u)
+			return
+		}
+	}
+	serveAdminCachedAsset(c, rel)
+}
+
+// GenAsset 提供 /admin/api/v1/gen/assets/:task_id/:seq —— 从 generation_result 取出
+// 第 seq 条记录的原始 URL，再按其类型分流（cached 文件 / 远程代理）。和用户端 Asset
+// 接口对齐，差异仅在前缀。
+func (h *AdminLogHandler) GenAsset(c *gin.Context) {
 	taskID := strings.TrimSpace(c.Param("task_id"))
+	seq, _ := strconv.Atoi(c.Param("seq"))
 	t, err := h.gen.GetByTaskID(c.Request.Context(), taskID)
 	if err != nil {
 		response.Fail(c, errcode.ResourceMissing)
 		return
 	}
-	results, err := h.gen.ListResultsByTask(c.Request.Context(), taskID)
-	if err != nil || len(results) == 0 {
+	result, err := h.gen.GetResultByTaskSeq(c.Request.Context(), taskID, seq)
+	if err != nil {
 		response.Fail(c, errcode.ResourceMissing)
 		return
 	}
-	r := results[0]
-	rawURL := r.URL
-	if t.Kind != "video" && r.ThumbURL != nil && *r.ThumbURL != "" {
-		rawURL = *r.ThumbURL
+	rawURL := strings.TrimSpace(result.URL)
+	if c.Query("thumb") == "1" {
+		if result.ThumbURL != nil && strings.TrimSpace(*result.ThumbURL) != "" {
+			rawURL = strings.TrimSpace(*result.ThumbURL)
+		} else if derived := deriveGrokPreviewImageURL(result.URL); derived != "" {
+			rawURL = derived
+		}
 	}
-	if t.Kind == "video" && c.Query("thumb") == "1" && r.ThumbURL != nil && *r.ThumbURL != "" {
-		rawURL = *r.ThumbURL
-	}
-	h.servePreviewURL(c, t, rawURL)
-}
-
-func (h *AdminLogHandler) servePreviewURL(c *gin.Context, t *model.GenerationTask, rawURL string) {
-	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
 		response.Fail(c, errcode.ResourceMissing)
 		return
@@ -167,25 +253,36 @@ func (h *AdminLogHandler) servePreviewURL(c *gin.Context, t *model.GenerationTas
 		serveAdminCachedAsset(c, strings.TrimPrefix(rawURL, "/api/v1/gen/cached/"))
 		return
 	}
-	if strings.HasPrefix(rawURL, "/admin/api/v1/") {
-		response.Fail(c, errcode.ResourceMissing)
+	if strings.HasPrefix(rawURL, "/admin/api/v1/gen/cached/") {
+		serveAdminCachedAsset(c, strings.TrimPrefix(rawURL, "/admin/api/v1/gen/cached/"))
+		return
+	}
+	if strings.HasPrefix(rawURL, "data:") {
+		c.Redirect(http.StatusFound, rawURL)
+		return
+	}
+	// 签名媒体短链（redirect / proxy 存储模式）：result.URL 是站内 /api/v1/m/<token>，
+	// 真实上游直链记录在 meta。已按 task_id+seq 定位到 result，无需验签，
+	// 按 meta.storage_mode 统一出口（proxy 流式转发 / redirect 302）。
+	if isInternalMediaPath(rawURL) {
+		serveSignedMedia(c, result.Meta, c.Query("thumb") == "1")
 		return
 	}
 	target := adminNormalizeGrokAssetURL(rawURL)
-	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
-		if !strings.Contains(target, "assets.grok.com") {
-			c.Redirect(http.StatusFound, target)
-			return
-		}
-		cookie, err := h.grokCookieForTask(c.Request.Context(), t)
-		if err != nil {
-			response.Fail(c, errcode.GPTUnavailable.WithMsg("资源下载凭证不可用"))
-			return
-		}
-		proxyRemoteAsset(c, target, cookie, rawURL)
+	if !(strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://")) {
+		response.Fail(c, errcode.ResourceMissing)
 		return
 	}
-	response.Fail(c, errcode.ResourceMissing)
+	if !strings.Contains(target, "assets.grok.com") {
+		c.Redirect(http.StatusFound, target)
+		return
+	}
+	cookie, err := h.grokCookieForTask(c.Request.Context(), t)
+	if err != nil {
+		response.Fail(c, errcode.GPTUnavailable.WithMsg("资源下载凭证不可用"))
+		return
+	}
+	proxyRemoteAsset(c, target, cookie, rawURL)
 }
 
 func serveAdminCachedAsset(c *gin.Context, rel string) {
@@ -294,8 +391,23 @@ func (h *AdminLogHandler) PurgeGenerationLogs(c *gin.Context) {
 		response.Fail(c, errcode.InvalidParam.Wrap(err))
 		return
 	}
-	before := time.Now().UTC().AddDate(0, 0, -req.Days)
-	deleted, err := h.gen.SoftDeleteAdminLogsBefore(c.Request.Context(), before)
+	// days=0 表示「不限时间」，但必须指定 status（典型：一键删所有失败），
+	// 拒绝 days=0 && status=nil 的请求避免把成功记录一起带走。
+	if req.Days == 0 && req.Status == nil {
+		response.Fail(c, errcode.InvalidParam.Wrap(fmt.Errorf("days=0 必须指定 status（典型 status=3 一键删失败）")))
+		return
+	}
+	// days=0 → before=now，相当于"截止现在的所有"
+	before := time.Now().UTC()
+	if req.Days > 0 {
+		before = before.AddDate(0, 0, -req.Days)
+	}
+	var statusFilter *int8
+	if req.Status != nil {
+		s := int8(*req.Status)
+		statusFilter = &s
+	}
+	deleted, err := h.gen.SoftDeleteAdminLogsBefore(c.Request.Context(), before, statusFilter)
 	if err != nil {
 		response.Fail(c, errcode.DBError.Wrap(err))
 		return

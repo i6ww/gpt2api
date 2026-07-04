@@ -27,6 +27,18 @@ type Config struct {
 	Billing   Billing   `mapstructure:"billing"`
 	CDN       CDN       `mapstructure:"cdn"`
 	AESKey    string    `mapstructure:"-"` // 来自环境变量
+	// Cluster：多节点功能。仅依赖环境变量，不写 yaml。
+	Cluster Cluster `mapstructure:"-"`
+}
+
+// Cluster 多节点环境变量集合。详见 deploy/docs/CLUSTER_OVERVIEW.md。
+type Cluster struct {
+	// BootstrapSecret 主控签发 / agent 校验 bootstrap token 的根密钥。
+	// 32 字节随机串（hex 或 base64）；prod 必填，dev 可空（→ 集群禁用）。
+	BootstrapSecret string
+	// ControlURL 主控对外 URL（agent 启动时回填给运维 / 心跳 / lease）。
+	// 如 https://api.klein.example
+	ControlURL string
 }
 
 type App struct {
@@ -50,6 +62,7 @@ type MySQL struct {
 	MaxOpenConns    int           `mapstructure:"max_open_conns"`
 	MaxIdleConns    int           `mapstructure:"max_idle_conns"`
 	ConnMaxLifetime time.Duration `mapstructure:"conn_max_lifetime"`
+	ConnMaxIdleTime time.Duration `mapstructure:"conn_max_idle_time"`
 	SlowThreshold   time.Duration `mapstructure:"slow_threshold"`
 }
 
@@ -188,6 +201,8 @@ func loadInternal() (*Config, error) {
 	mapEnv(&out.JWT.Secret, "KLEIN_JWT_SECRET")
 	mapEnv(&out.JWT.RefreshSecret, "KLEIN_JWT_REFRESH_SECRET")
 	mapEnv(&out.AESKey, "KLEIN_AES_KEY")
+	mapEnv(&out.Cluster.BootstrapSecret, "KLEIN_CLUSTER_BOOTSTRAP_SECRET")
+	mapEnv(&out.Cluster.ControlURL, "KLEIN_CLUSTER_CONTROL_URL")
 	mapEnv(&out.Provider.OpenAIBase, "KLEIN_OPENAI_BASE")
 	mapEnv(&out.Provider.GrokBase, "KLEIN_GROK_BASE")
 	mapEnv(&out.Logger.Dir, "KLEIN_LOG_DIR")

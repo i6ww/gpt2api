@@ -35,6 +35,10 @@ func MountAPI(r *gin.Engine, deps *bootstrap.Deps) {
 	genRepo := repo.NewGenerationRepo(deps.DB)
 	sysCfgRepo := repo.NewSystemConfigRepo(deps.DB)
 	proxyRepo := repo.NewProxyRepo(deps.DB)
+	inviteRepo := repo.NewInviteRepo(deps.DB)
+	clusterNodeRepo := repo.NewClusterNodeRepo(deps.DB)
+	downloadLocRepo := repo.NewDownloadLocatorRepo(deps.DB)
+	accountLeaseRepo := repo.NewAccountLeaseRepo(deps.DB)
 
 	authSvc := service.NewAuthService(deps.DB, userRepo, deps.JWT)
 	userSvc := service.NewUserService(userRepo)
@@ -43,20 +47,61 @@ func MountAPI(r *gin.Engine, deps *bootstrap.Deps) {
 	cdkSvc := service.NewCDKService(deps.DB, billingSvc)
 	sysCfgSvc := service.NewSystemConfigService(sysCfgRepo)
 	proxySvc := service.NewProxyService(proxyRepo, deps.AES)
+	inviteSvc := service.NewInviteService(inviteRepo, userRepo, sysCfgSvc, billingSvc)
+	// 注册赠点：让 AuthService.Register 读取 billing.free_initial_points 并发放。
+	authSvc.SetSignupGift(billingSvc, sysCfgSvc)
+
+	upstreamChannelRepo := repo.NewUpstreamChannelRepo(deps.DB)
+	taskCostLogRepo := repo.NewTaskCostLogRepo(deps.DB)
+	upstreamChannelSvc := service.NewUpstreamChannelService(upstreamChannelRepo, deps.AES)
+	costRecorder := service.NewCostRecorder(upstreamChannelSvc, sysCfgSvc, taskCostLogRepo)
+
+	announcementRepo := repo.NewAnnouncementRepo(deps.DB)
+	announcementSvc := service.NewAnnouncementService(announcementRepo)
+	announcementH := handler.NewAnnouncementHandler(announcementSvc)
 
 	pool := service.NewAccountPool(accountRepo, 30*time.Second)
+	pool.SetLeaseRepo(accountLeaseRepo)
 	providers := factory.Build()
+	clusterSvc := service.NewClusterService(clusterNodeRepo, downloadLocRepo, sysCfgSvc, deps.AES)
+	if len(deps.ClusterBootstrap) > 0 {
+		clusterSvc.SetBootstrapSecret(deps.ClusterBootstrap)
+	}
 	genSvc := service.NewGenerationService(deps.DB, genRepo, pool, billingSvc, providers, service.ConfigPriceFn(sysCfgSvc), deps.AES, proxySvc, sysCfgSvc)
+	genSvc.SetCostRecorder(costRecorder)
+	genSvc.SetClusterService(clusterSvc)
+	genSvc.SetWebhookService(service.NewWebhookService(deps.Cfg, deps.Redis, sysCfgSvc))
 	chatSvc := service.NewChatService(deps.DB, genRepo, pool, billingSvc, sysCfgSvc, deps.AES, proxySvc)
+	chatSvc.SetCostRecorder(costRecorder)
 
 	authH := handler.NewAuthHandler(authSvc, userSvc)
 	keyH := handler.NewAPIKeyHandler(keySvc)
-	billH := handler.NewBillingHandler(billingSvc, cdkSvc)
+	billH := handler.NewBillingHandler(billingSvc, cdkSvc, sysCfgSvc)
 	genH := handler.NewGenerationHandler(genSvc, chatSvc, genRepo, accountRepo, sysCfgSvc, deps.AES)
+	genH.SetClusterService(clusterSvc)
+	inviteH := handler.NewInviteHandler(inviteSvc)
 
 	v1.GET("/models", genH.Models)
+	// 公开公告：用户端首页顶部滚动条用，未登录也要可见。
+	v1.GET("/announcements", announcementH.ListActive)
+	// 充值套餐 + 客服联系方式：billing 页未登录访问时（如游客逛价）也展示，
+	// 内部已过滤掉 remark / 内部备注 / 支付密钥等敏感字段，无需鉴权。
+	v1.GET("/recharge/products", billH.RechargeProducts)
 	v1.GET("/gen/cached/*path", genH.CachedAsset)
 	v1.GET("/gen/assets/:task_id/:seq", genH.Asset)
+	// 重定向直链：storage.result_cache_driver=redirect 时，结果 URL 是签名短链，
+	// 命中后 302 跳转到上游临时直链。公开访问（<img src> 直接用），靠 HMAC + 过期防猜。
+	v1.GET("/m/:token", genH.RedirectMedia)
+	v1.GET("/gen/media/:token", genH.RedirectMedia) // 兼容历史长链接
+	// 公开匿名 + IP 限流的「下载失败汇报」端点；让浏览器在 302 到边缘节点失败时
+	// 把对应 locator 标 tainted，下次 ResolveDownload 自动跳过该节点。
+	{
+		tainted := v1.Group("/gen/cached")
+		if deps.Limiter != nil {
+			tainted.Use(middleware.RateLimitIP(deps.Limiter, 60))
+		}
+		tainted.POST("/tainted", genH.ReportTaintedAsset)
+	}
 
 	auth := v1.Group("/auth")
 	{
@@ -80,6 +125,7 @@ func MountAPI(r *gin.Engine, deps *bootstrap.Deps) {
 		keys := authed.Group("/keys")
 		{
 			keys.GET("", keyH.List)
+			keys.GET("/stats", keyH.Stats)
 			keys.POST("", keyH.Create)
 			keys.POST("/:id/toggle", keyH.Toggle)
 			keys.DELETE("/:id", keyH.Delete)
@@ -96,9 +142,16 @@ func MountAPI(r *gin.Engine, deps *bootstrap.Deps) {
 			gen.POST("/image", genH.CreateImage)
 			gen.POST("/text", genH.CreateText)
 			gen.POST("/video", genH.CreateVideo)
+			gen.POST("/music", genH.CreateMusic)
 			gen.GET("/tasks/:task_id", genH.Get)
 			gen.GET("/history", genH.List)
 			gen.DELETE("/history", genH.DeleteHistory)
+		}
+
+		invite := authed.Group("/invite")
+		{
+			invite.GET("/summary", inviteH.Summary)
+			invite.GET("/invitees", inviteH.Invitees)
 		}
 	}
 }

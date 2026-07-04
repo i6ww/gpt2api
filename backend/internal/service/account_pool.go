@@ -25,6 +25,7 @@ import (
 // AccountPool 多 provider 共用一个池实例，内部按 provider 分桶。
 type AccountPool struct {
 	repo     *repo.AccountRepo
+	leases   *repo.AccountLeaseRepo
 	cacheTTL time.Duration
 	mu       sync.RWMutex
 	buckets  map[string]*providerBucket // key: provider
@@ -53,6 +54,14 @@ func NewAccountPool(r *repo.AccountRepo, cacheTTL time.Duration) *AccountPool {
 	}
 }
 
+// SetLeaseRepo enables cross-process account leases.
+func (p *AccountPool) SetLeaseRepo(r *repo.AccountLeaseRepo) {
+	if p == nil {
+		return
+	}
+	p.leases = r
+}
+
 // Pick 取一个可用账号。strategy: round_robin / weighted_rr / random（默认 round_robin）。
 func (p *AccountPool) Pick(ctx context.Context, provider, strategy string) (*model.Account, error) {
 	return p.PickWhere(ctx, provider, strategy, nil)
@@ -67,69 +76,11 @@ func (p *AccountPool) PickWhere(ctx context.Context, provider, strategy string, 
 	if len(bucket.items) == 0 {
 		return nil, errcode.NoAvailableAcc
 	}
-	if predicate != nil {
-		filtered := &providerBucket{loadedAt: bucket.loadedAt}
-		for _, it := range bucket.items {
-			if predicate(it) {
-				filtered.items = append(filtered.items, it)
-			}
-		}
-		for i, it := range filtered.items {
-			w := it.Weight
-			if w <= 0 {
-				w = 1
-			}
-			for j := 0; j < w; j++ {
-				filtered.weights = append(filtered.weights, w)
-				filtered.wIdx = append(filtered.wIdx, i)
-			}
-		}
-		bucket = filtered
+	attempts := len(bucket.items)
+	if strategy == "weighted_rr" && len(bucket.wIdx) > attempts {
+		attempts = len(bucket.wIdx)
 	}
-	if len(bucket.items) == 0 {
-		return nil, errcode.NoAvailableAcc
-	}
-
-	switch strategy {
-	case "weighted_rr":
-		return p.pickWeighted(bucket), nil
-	default:
-		return p.pickRR(bucket), nil
-	}
-}
-
-// ReserveWhere 选取并占用一个账号，确保同一个账号不会被并发复用。
-func (p *AccountPool) ReserveWhere(ctx context.Context, provider, strategy string, predicate func(*model.Account) bool) (*model.Account, error) {
-	bucket, err := p.getBucket(ctx, provider)
-	if err != nil {
-		return nil, err
-	}
-	if len(bucket.items) == 0 {
-		return nil, errcode.NoAvailableAcc
-	}
-	if predicate != nil {
-		filtered := &providerBucket{loadedAt: bucket.loadedAt}
-		for _, it := range bucket.items {
-			if predicate(it) {
-				filtered.items = append(filtered.items, it)
-			}
-		}
-		for i, it := range filtered.items {
-			w := it.Weight
-			if w <= 0 {
-				w = 1
-			}
-			for j := 0; j < w; j++ {
-				filtered.weights = append(filtered.weights, w)
-				filtered.wIdx = append(filtered.wIdx, i)
-			}
-		}
-		bucket = filtered
-	}
-	if len(bucket.items) == 0 {
-		return nil, errcode.NoAvailableAcc
-	}
-	for i := 0; i < len(bucket.items); i++ {
+	for i := 0; i < attempts; i++ {
 		var acc *model.Account
 		switch strategy {
 		case "weighted_rr":
@@ -140,7 +91,61 @@ func (p *AccountPool) ReserveWhere(ctx context.Context, provider, strategy strin
 		if acc == nil {
 			break
 		}
+		if predicate == nil || predicate(acc) {
+			return acc, nil
+		}
+	}
+	return nil, errcode.NoAvailableAcc
+}
+
+// ReserveWhere 选取并占用一个账号，确保同一个账号不会被并发复用。
+func (p *AccountPool) ReserveWhere(ctx context.Context, provider, strategy string, predicate func(*model.Account) bool) (*model.Account, error) {
+	return p.reserveWhere(ctx, provider, strategy, "", "", predicate)
+}
+
+// ReserveForTaskWhere reserves an account for a concrete task and writes a
+// distributed lease when lease repo is configured.
+func (p *AccountPool) ReserveForTaskWhere(ctx context.Context, provider, strategy, taskID, holder string, predicate func(*model.Account) bool) (*model.Account, error) {
+	return p.reserveWhere(ctx, provider, strategy, taskID, holder, predicate)
+}
+
+func (p *AccountPool) reserveWhere(ctx context.Context, provider, strategy, taskID, holder string, predicate func(*model.Account) bool) (*model.Account, error) {
+	bucket, err := p.getBucket(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+	if len(bucket.items) == 0 {
+		return nil, errcode.NoAvailableAcc
+	}
+	attempts := len(bucket.items)
+	if strategy == "weighted_rr" && len(bucket.wIdx) > attempts {
+		attempts = len(bucket.wIdx)
+	}
+	for i := 0; i < attempts; i++ {
+		var acc *model.Account
+		switch strategy {
+		case "weighted_rr":
+			acc = p.pickWeighted(bucket)
+		default:
+			acc = p.pickRR(bucket)
+		}
+		if acc == nil {
+			break
+		}
+		if predicate != nil && !predicate(acc) {
+			continue
+		}
 		if !shouldReserveAccount(acc) {
+			return acc, nil
+		}
+		if p.leases != nil && taskID != "" {
+			ok, err := p.leases.TryAcquireWithLimit(ctx, provider, acc.ID, taskID, holder, 30*time.Minute, accountLeaseConcurrency(provider))
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue
+			}
 			return acc, nil
 		}
 		if p.tryReserve(acc.ID) {
@@ -170,6 +175,22 @@ func (p *AccountPool) MarkFailed(ctx context.Context, accountID uint64, reason s
 	}
 }
 
+// MarkInvalid 把账号标记为「token 永久失效」终态：从可用池踢出且不进自动续期复活，
+// 但保留行记录（status=invalid + error_message + failure_count++）便于后台审计与人工恢复。
+//
+// 专用于生成时遭遇干净的 token 鉴权失败（firefly 401/403）——避免该号在
+// cooldown↔valid 之间被自动续期反复拉回、反复入选、反复失败（僵尸号）。
+func (p *AccountPool) MarkInvalid(ctx context.Context, accountID uint64, reason string) {
+	if accountID == 0 {
+		return
+	}
+	provider := accountIDProvider(p, accountID)
+	if err := p.repo.MarkInvalidForProvider(ctx, accountID, truncate(reason, 240), provider); err != nil {
+		logger.FromCtx(ctx).Warn("account.mark_invalid", zap.Uint64("id", accountID), zap.Error(err))
+	}
+	p.invalidate(provider)
+}
+
 // MarkTransientFailed records an upstream path failure without increasing
 // error_count or placing the account into cooldown.
 func (p *AccountPool) MarkTransientFailed(ctx context.Context, accountID uint64, reason string) {
@@ -192,6 +213,17 @@ func (p *AccountPool) Release(accountID uint64) {
 	p.busyMu.Lock()
 	delete(p.busy, accountID)
 	p.busyMu.Unlock()
+}
+
+// ReleaseForTask releases both in-process reservation and distributed lease.
+func (p *AccountPool) ReleaseForTask(ctx context.Context, provider string, accountID uint64, taskID string) {
+	if p == nil {
+		return
+	}
+	if p.leases != nil && taskID != "" {
+		_ = p.leases.Release(ctx, provider, accountID, taskID)
+	}
+	p.Release(accountID)
 }
 
 // Reload 强制重新装载某 provider（管理后台 CRUD 后调用）。
@@ -313,4 +345,16 @@ func shouldReserveAccount(acc *model.Account) bool {
 		return false
 	}
 	return true
+}
+
+// accountLeaseConcurrency 单个账号允许的并发任务数（分布式租约上限）。
+//
+// 生产策略：一号一并发。账号池不够时不复用账号硬顶上游，而是让任务保持 pending，
+// 下一轮 lease 再抢，形成自然排队。全站并发上限由 openai.admission_max_inflight /
+// cluster_node.max_concurrency 控制。
+//
+// 注意：调小此值需配合清理存量 account_lease（旧租约 30 分钟才过期），否则旧的
+// 多槽租约会影响新规则。
+func accountLeaseConcurrency(provider string) int {
+	return 1
 }

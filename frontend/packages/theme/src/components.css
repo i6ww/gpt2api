@@ -83,16 +83,15 @@
   .btn-icon.btn-lg { width: var(--ctl-h-lg); }
   .btn-icon.btn-xl { width: var(--ctl-h-xl); }
 
-  /* 语义 · primary（克莱因蓝渐变） */
+  /* 语义 · primary（克莱因蓝渐变 — 常态无明显光晕，hover 时浮起） */
   .btn-primary {
     background-image: var(--klein-gradient);
     color: var(--text-on-klein);
-    box-shadow: var(--klein-glow-soft);
     border-color: transparent;
   }
   .btn-primary:hover:not(:disabled):not([aria-disabled='true']) {
-    box-shadow: var(--klein-glow);
-    filter: brightness(1.05);
+    box-shadow: var(--klein-glow-soft);
+    filter: brightness(1.06);
   }
 
   /* 语义 · secondary（克莱因蓝弱底，常用于次级 CTA） */
@@ -127,15 +126,14 @@
     color: var(--text-primary);
   }
 
-  /* 语义 · danger */
+  /* 语义 · danger（常态无外发光，hover 加一层柔和阴影） */
   .btn-danger {
     background: var(--danger-500);
     color: #fff;
-    box-shadow: 0 4px 14px rgba(220, 38, 38, .25);
   }
   .btn-danger:hover:not(:disabled):not([aria-disabled='true']) {
     background: var(--danger-600);
-    box-shadow: 0 6px 18px rgba(220, 38, 38, .35);
+    box-shadow: 0 1px 2px rgba(220, 38, 38, .18);
   }
   .btn-danger-ghost {
     background: transparent;
@@ -217,8 +215,9 @@
   .select:focus,
   .textarea:focus {
     outline: none;
-    border-color: var(--klein-500);
-    box-shadow: var(--focus-ring);
+    /* 不再用 klein 蓝色高亮 + 3px 光晕，改成中性深边框，避免抢戏 */
+    border-color: var(--border-strong);
+    box-shadow: none;
   }
   .input:disabled,
   .select:disabled,
@@ -254,7 +253,9 @@
   .input-error:focus,
   .select-error:focus,
   .textarea-error:focus {
-    box-shadow: var(--focus-ring-danger);
+    /* 错误态 focus：保留红边框（来自 .input-error），去掉 3px 光晕 */
+    border-color: var(--danger-500);
+    box-shadow: none;
   }
 
   /* 输入框 + 前后图标 */
@@ -366,10 +367,10 @@
     border-radius: var(--radius-lg);
   }
   .card-section {
-    padding: var(--space-5);
+    padding: var(--space-3);
   }
   @media (min-width: 1024px) {
-    .card-section { padding: var(--space-6); }
+    .card-section { padding: var(--space-4); }
   }
 
   /* 旧 alias */
@@ -456,32 +457,32 @@
      默认 max-width 1280px，已充分覆盖侧栏外的可阅读宽度；
      padding 在三档断点之间稳定阶梯，确保左右间距一致。 */
   .page {
-    padding: var(--space-5) var(--space-5);
-    max-width: 1280px;
+    padding: var(--space-3) var(--space-3);
+    max-width: 1440px;
     margin-inline: auto;
     width: 100%;
   }
-  @media (min-width: 768px)  { .page { padding: var(--space-6) var(--space-6); } }
-  @media (min-width: 1280px) { .page { padding: var(--space-8) var(--space-8); } }
+  @media (min-width: 768px)  { .page { padding: var(--space-4) var(--space-5); } }
+  @media (min-width: 1280px) { .page { padding: var(--space-5) var(--space-6); } }
 
   /* 文档/表单/落地页等需要更窄阅读栏宽的页面 */
   .page-narrow { max-width: 880px; }
-  /* 数据后台等需要更宽布局，仅 admin 用 */
-  .page-wide   { max-width: 1440px; }
+  /* 数据后台等需要更宽布局 — 不再额外限制 */
+  .page-wide   { max-width: none; }
 
   .page-header {
     display: flex;
     flex-wrap: wrap;
-    align-items: flex-end;
+    align-items: center;
     justify-content: space-between;
-    gap: var(--space-4);
-    margin-bottom: var(--space-5);
+    gap: var(--space-3);
+    margin-bottom: var(--space-3);
   }
   .page-title {
-    font-size: var(--fs-h1);
+    font-size: var(--fs-h4);
     line-height: var(--lh-tight);
     letter-spacing: var(--tracking-tight);
-    font-weight: var(--weight-bold);
+    font-weight: var(--weight-semibold);
     color: var(--text-primary);
   }
   .page-subtitle {
@@ -569,22 +570,24 @@
     width: 100%;
     border-collapse: separate;
     border-spacing: 0;
-    font-size: var(--fs-body);
+    font-size: var(--fs-small);
   }
   .data-table thead th {
     text-align: left;
-    padding: 10px var(--space-5);
-    font-size: var(--fs-small);
+    padding: 8px var(--space-3);
+    font-size: var(--fs-tiny);
     font-weight: var(--weight-medium);
-    color: var(--text-secondary);
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
     background: var(--surface-2);
     border-bottom: 1px solid var(--border-default);
     white-space: nowrap;
   }
-  .data-table thead th:first-child { border-top-left-radius: var(--radius-lg); }
-  .data-table thead th:last-child  { border-top-right-radius: var(--radius-lg); text-align: right; }
+  .data-table thead th:first-child { border-top-left-radius: var(--radius-md); }
+  .data-table thead th:last-child  { border-top-right-radius: var(--radius-md); text-align: right; }
   .data-table tbody td {
-    padding: 14px var(--space-5);
+    padding: 8px var(--space-3);
     border-bottom: 1px solid var(--border-subtle);
     color: var(--text-primary);
     vertical-align: middle;

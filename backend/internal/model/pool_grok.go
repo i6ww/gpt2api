@@ -17,10 +17,20 @@ const (
 // PoolGrok 账号订阅类型。空串 = 未识别 / 未刷新。
 const (
 	GrokAccountTypeFree           = "free"
+	GrokAccountTypeSuperGrokLite  = "super_grok_lite"
 	GrokAccountTypeSuperGrok      = "super_grok"
 	GrokAccountTypeSuperGrokHeavy = "super_grok_heavy"
 	GrokAccountTypeTeam           = "team"
 	GrokAccountTypeUnknown        = "unknown"
+)
+
+// 订阅状态常量 — 来自 /rest/subscriptions.status 归一后的值。
+const (
+	GrokSubStatusActive   = "active"
+	GrokSubStatusTrialing = "trialing"
+	GrokSubStatusInactive = "inactive"
+	GrokSubStatusPastDue  = "past_due"
+	GrokSubStatusCanceled = "canceled"
 )
 
 // PoolGrok 状态（gateway 调度态，与 pool_gpt 对齐）。
@@ -48,9 +58,24 @@ type PoolGrok struct {
 	AccountType    string     `gorm:"column:account_type;size:32;not null;default:''" json:"account_type"`
 
 	// Gateway runtime 字段。
-	Status            string     `gorm:"column:status;size:32;not null;default:valid" json:"status"`
-	ExpiresAt         *time.Time `gorm:"column:expires_at" json:"expires_at,omitempty"`
-	LastRefreshAt     *time.Time `gorm:"column:last_refresh_at" json:"last_refresh_at,omitempty"`
+	Status string `gorm:"column:status;size:32;not null;default:valid" json:"status"`
+	// ExpiresAt subscription 的"下次结算日"。语义跟着 CancelAtPeriodEnd：
+	//   - CancelAtPeriodEnd=false → 自动续费扣费日（过了会自动延一周期）
+	//   - CancelAtPeriodEnd=true  → 真到期失效日
+	// UI 必须读两个字段一起判断，不要单看 ExpiresAt。
+	ExpiresAt *time.Time `gorm:"column:expires_at" json:"expires_at,omitempty"`
+	// CancelAtPeriodEnd 用户是否已退订。来自 /rest/subscriptions.cancelAtPeriodEnd。
+	CancelAtPeriodEnd bool `gorm:"column:cancel_at_period_end;not null;default:0" json:"cancel_at_period_end"`
+	// BillingInterval "monthly" / "yearly" / ""。来自 /rest/subscriptions.billingInterval。
+	BillingInterval string `gorm:"column:billing_interval;size:16;not null;default:''" json:"billing_interval"`
+	// SubscriptionStatus 订阅生命周期状态："active" / "trialing" / "past_due" /
+	// "canceled" / "inactive" / ""。来自 /rest/subscriptions.status 归一。
+	// 区分"三天试用中"和"正式订阅"用 trialing；"欠费"用 past_due。
+	SubscriptionStatus string `gorm:"column:subscription_status;size:32;not null;default:''" json:"subscription_status"`
+	// ProductID stripe.productId — 比 account_type 字段更精细，能区分 Lite。
+	// prod_RilhxLgoA7h5ri = SuperGrok / Sdnv8D1IKHvyAs = Heavy / UB9qtKxWZvyvtM = Lite
+	ProductID     string     `gorm:"column:product_id;size:64;not null;default:''" json:"product_id"`
+	LastRefreshAt *time.Time `gorm:"column:last_refresh_at" json:"last_refresh_at,omitempty"`
 	LastUsedAt        *time.Time `gorm:"column:last_used_at" json:"last_used_at,omitempty"`
 	ErrorMessage      *string    `gorm:"column:error_message;size:500" json:"error_message,omitempty"`
 	ProxyID           *uint64    `gorm:"column:proxy_id" json:"proxy_id,omitempty"`

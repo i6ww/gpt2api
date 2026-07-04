@@ -1,18 +1,118 @@
-gpt2api.com, www.gpt2api.com {
-	encode gzip zstd
+# =====================================================
+# KleinAI · Caddy 主控边缘配置
+#
+# 站点：
+#   gpt2api.com / www.gpt2api.com → 用户站 + /api + /v1（openai 兼容）
+#   admin.gpt2api.com             → 管理后台 + /admin/api
+#
+# TLS：
+#   走 Caddy 内置 ACME，自动 HTTP-01 / TLS-ALPN-01 拿 Let's Encrypt 证书。
+#   Cloudflare 橙云代理默认透传 /.well-known/acme-challenge/* 到源站，
+#   所以 CF Proxied 不影响申请；CF SSL 模式建议 Full / Full (strict)，
+#   "Always Use HTTPS" 开关无所谓（CF 不会把 ACME 路径强转 HTTPS）。
+#   续期由 caddy 内部定时器自动跑（默认提前 30 天），证书 / 私钥保存在
+#   docker volume klein-caddy-data 里，跨重启不会丢。
+#
+# 重载：
+#   docker compose -f docker-compose.prod.yml exec caddy caddy reload --config /etc/caddy/Caddyfile
+# =====================================================
 
+{
+	email admin@gpt2api.com
+
+	servers {
+		max_header_size 64KB
+	}
+}
+
+(common_headers) {
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "strict-origin-when-cross-origin"
 	}
+}
 
-	handle /api/v1/* {
-		reverse_proxy api:17180
+gpt2api.com, www.gpt2api.com {
+	encode gzip zstd
+	import common_headers
+
+	# /api/v1/gen/cached/ —— 主控直接吐文件 / 302 到边缘节点。
+	# 关掉 buffering 让 302 立即返回，避免视频被 caddy 缓冲半天才下发。
+	@cached path /api/v1/gen/cached/*
+	handle @cached {
+		reverse_proxy api:17180 {
+			flush_interval -1
+			transport http {
+				read_timeout 600s
+			}
+		}
 	}
 
+	# 业务 API（含 /ws WebSocket 升级）
+	@apiws path /api/* /ws*
+	handle @apiws {
+		reverse_proxy api:17180 {
+			transport http {
+				read_timeout 600s
+				write_timeout 600s
+			}
+		}
+	}
+
+	# OpenAI 兼容
 	handle /v1/* {
-		reverse_proxy openai:17200
+		reverse_proxy openai:17200 {
+			transport http {
+				read_timeout 600s
+			}
+		}
+	}
+
+	# Google GenAI / Gemini 兼容
+	handle /v1beta/* {
+		reverse_proxy openai:17200 {
+			transport http {
+				read_timeout 600s
+			}
+		}
+	}
+
+	# 用户前端 SPA
+	handle {
+		reverse_proxy user-web:80
+	}
+}
+
+# 允许直接用服务器 IP 测试 OpenAI / Gemini 兼容接口：
+#   http://YOUR_SERVER_IP/v1/...
+#   http://YOUR_SERVER_IP/v1beta/...
+:80 {
+	encode gzip zstd
+
+	handle /v1/* {
+		reverse_proxy openai:17200 {
+			transport http {
+				read_timeout 600s
+			}
+		}
+	}
+
+	handle /v1beta/* {
+		reverse_proxy openai:17200 {
+			transport http {
+				read_timeout 600s
+			}
+		}
+	}
+
+	handle /api/* {
+		reverse_proxy api:17180 {
+			transport http {
+				read_timeout 600s
+				write_timeout 600s
+			}
+		}
 	}
 
 	handle {
@@ -22,15 +122,14 @@ gpt2api.com, www.gpt2api.com {
 
 admin.gpt2api.com {
 	encode gzip zstd
-
-	header {
-		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-		X-Content-Type-Options "nosniff"
-		Referrer-Policy "strict-origin-when-cross-origin"
-	}
+	import common_headers
 
 	handle /admin/api/* {
-		reverse_proxy admin:17188
+		reverse_proxy admin:17188 {
+			transport http {
+				read_timeout 600s
+			}
+		}
 	}
 
 	handle {

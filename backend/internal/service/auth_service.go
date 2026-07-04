@@ -4,6 +4,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -23,14 +24,23 @@ import (
 
 // AuthService 用户认证。
 type AuthService struct {
-	db   *gorm.DB
-	user *repo.UserRepo
-	jwt  *jwtx.Manager
+	db      *gorm.DB
+	user    *repo.UserRepo
+	jwt     *jwtx.Manager
+	billing *BillingService
+	sysCfg  *SystemConfigService
 }
 
 // NewAuthService 构造。
 func NewAuthService(db *gorm.DB, userRepo *repo.UserRepo, jwt *jwtx.Manager) *AuthService {
 	return &AuthService{db: db, user: userRepo, jwt: jwt}
+}
+
+// SetSignupGift 注入注册赠点依赖（billing + system_config）。
+// 不注入时 Register 不发放初始积分（保持向后兼容、单测可省略）。
+func (s *AuthService) SetSignupGift(billing *BillingService, sysCfg *SystemConfigService) {
+	s.billing = billing
+	s.sysCfg = sysCfg
 }
 
 var (
@@ -95,6 +105,21 @@ func (s *AuthService) Register(ctx context.Context, req *dto.RegisterReq, ip str
 	})
 	if err != nil {
 		return nil, nil, err
+	}
+
+	// 注册赠点：后台「新用户赠送积分」(billing.free_initial_points, ×100 入库)。
+	// best-effort —— 赠点失败不应阻断注册成功，记 warn 便于排查。
+	if s.billing != nil && s.sysCfg != nil {
+		if pts := s.sysCfg.FreeInitialPoints(ctx); pts > 0 {
+			bizID := fmt.Sprintf("signup:%d", user.ID)
+			if gerr := s.billing.GrantPoints(ctx, user.ID, model.BizGift, bizID, pts, "新用户注册赠送"); gerr != nil {
+				logger.FromCtx(ctx).Warn("auth.register.gift_failed",
+					zap.Uint64("uid", user.ID), zap.Int64("points", pts), zap.Error(gerr))
+			} else {
+				logger.FromCtx(ctx).Info("auth.register.gift",
+					zap.Uint64("uid", user.ID), zap.Int64("points", pts))
+			}
+		}
 	}
 
 	tok, err := s.issue(user)

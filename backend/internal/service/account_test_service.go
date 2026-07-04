@@ -1118,24 +1118,43 @@ func (s *AccountTestService) TestProxy(ctx context.Context, p *model.Proxy) (*dt
 	if err != nil {
 		return nil, errcode.Internal.Wrap(err)
 	}
-	target := "https://httpbin.org/ip"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-	if err != nil {
-		return nil, errcode.Internal.Wrap(err)
+	// 多目标兜底：任一返回 2xx 即判定代理可用。
+	// 旧实现只探 httpbin.org/ip —— 该免费服务经常自身 503，会把好代理误判为 FAIL。
+	// 依次尝试更稳定的探测点；只有全部失败才标记不可用，错误取最后一次。
+	targets := []string{
+		"https://api.ipify.org",                 // 返回纯 IP，稳定
+		"https://www.gstatic.com/generate_204",  // Google 204，极稳定
+		"https://checkip.amazonaws.com",         // AWS 兜底
 	}
-	start := time.Now()
-	resp, err := client.Do(req)
-	latency := int(time.Since(start) / time.Millisecond)
-	if err != nil {
-		_ = s.proxySvc.MarkCheck(ctx, p.ID, false, latency, err.Error())
-		return &dto.ProxyTestResp{OK: false, LatencyMs: latency, Error: err.Error()}, nil
+	var (
+		ok       bool
+		latency  int
+		errMsg   string
+		lastErr  string
+	)
+	for _, target := range targets {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		if err != nil {
+			lastErr = err.Error()
+			continue
+		}
+		start := time.Now()
+		resp, derr := client.Do(req)
+		latency = int(time.Since(start) / time.Millisecond)
+		if derr != nil {
+			lastErr = derr.Error()
+			continue
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+		resp.Body.Close()
+		if resp.StatusCode/100 == 2 {
+			ok = true
+			break
+		}
+		lastErr = fmt.Sprintf("HTTP %d", resp.StatusCode)
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
-	ok := resp.StatusCode/100 == 2
-	errMsg := ""
 	if !ok {
-		errMsg = fmt.Sprintf("HTTP %d", resp.StatusCode)
+		errMsg = lastErr
 	}
 	_ = s.proxySvc.MarkCheck(ctx, p.ID, ok, latency, errMsg)
 	return &dto.ProxyTestResp{OK: ok, LatencyMs: latency, Error: errMsg}, nil

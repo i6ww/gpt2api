@@ -5,8 +5,12 @@ import "time"
 
 // Provider 提供商。
 const (
-	ProviderGPT  = "gpt"
-	ProviderGROK = "grok"
+	ProviderGPT       = "gpt"
+	ProviderGROK      = "grok"
+	ProviderXAI       = "xai"
+	ProviderPIC2API   = "pic2api"
+	ProviderADOBE     = "adobe"
+	ProviderFLOWMUSIC = "flowmusic"
 )
 
 // AuthType 认证类型。

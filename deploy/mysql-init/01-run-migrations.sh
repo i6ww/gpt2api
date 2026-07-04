@@ -40,7 +40,11 @@ unset IFS
 
 for f in "${sorted[@]}"; do
   echo "[klein-init] applying $f ..."
+  # 现状：我们的 migrations 大多数是「纯 CREATE/ALTER」，没有 goose Up/Down 标记。
+  # 这里的策略：默认全部输出；遇到 `+goose Down` 关闭、`+goose Up` 重新打开。
+  # 这样既兼容 goose 风格文件，也兼容裸 SQL 文件。
   awk '
+    BEGIN { flag = 1 }
     /^[[:space:]]*--[[:space:]]*\+goose[[:space:]]+Up([[:space:]]|$)/ {flag=1; next}
     /^[[:space:]]*--[[:space:]]*\+goose[[:space:]]+Down([[:space:]]|$)/ {flag=0; next}
     /^[[:space:]]*--[[:space:]]*\+goose[[:space:]]+StatementBegin([[:space:]]|$)/ {next}

@@ -17,8 +17,10 @@
   --klein-800: #001A66;
   --klein-900: #000F40;
 
-  --klein-glow:      0 0 24px rgba(30, 61, 255, .55), 0 0 60px rgba(0, 47, 167, .35);
-  --klein-glow-soft: 0 8px 24px rgba(0, 47, 167, .18);
+  /* 克莱因蓝高光：仅在 hero / 重要 CTA 之外保留较弱的阴影；
+     按钮的常态阴影已经在 components.css 里下调，避免整页蓝色光晕。 */
+  --klein-glow:      0 4px 12px rgba(0, 47, 167, .18);
+  --klein-glow-soft: 0 1px 2px rgba(0, 47, 167, .10);
   --klein-gradient:      linear-gradient(135deg, #002FA7 0%, #1E3DFF 100%);
   --klein-gradient-soft: linear-gradient(135deg, rgba(0,47,167,.12) 0%, rgba(30,61,255,.10) 100%);
 
@@ -234,9 +236,18 @@ body {
 
 ::selection { background: var(--klein-500); color: #fff; }
 
+/* 全局键盘聚焦提示：保留可访问性，但用中性 1px 细边代替蓝色 3px 光晕。
+   原来的 box-shadow: var(--focus-ring) 会让 Tab 焦点 / select 打开 / button 聚焦
+   都吃到一圈 0 0 0 3px 鲜艳蓝色光晕，太刺眼。改成中性 outline。 */
 :focus-visible {
+  outline: 1px solid var(--border-strong);
+  outline-offset: 1px;
+  box-shadow: none;
+}
+/* 鼠标点击触发的 :focus 不输出额外提示，避免点一下就被全屏蓝边围绕。
+   键盘聚焦走 :focus-visible 上面那条规则。 */
+:focus:not(:focus-visible) {
   outline: none;
-  box-shadow: var(--focus-ring);
 }
 
 /* 响应式正文：在大屏适度放大 */

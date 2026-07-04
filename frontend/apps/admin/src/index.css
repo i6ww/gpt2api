@@ -16,9 +16,280 @@
   }
 }
 
+@media (max-width: 767px) {
+  .page {
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+    padding-top: 0.75rem;
+    padding-bottom: 1rem;
+  }
+
+  .page-wide {
+    max-width: 100%;
+  }
+
+  .page-header {
+    flex-direction: column;
+    gap: 0.75rem;
+    align-items: flex-start;
+  }
+
+  .page-header > div:last-child {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .page-header .btn {
+    flex: 1 1 auto;
+  }
+
+  .page-header > div:last-child,
+  .page-header > div:last-child > * {
+    flex-wrap: wrap;
+  }
+
+  .card.card-section {
+    padding-left: 0.875rem !important;
+    padding-right: 0.875rem !important;
+  }
+
+  .dialog-surface {
+    width: min(100%, calc(100vw - 1rem));
+    max-height: calc(100vh - 1rem);
+    border-radius: 1rem;
+  }
+
+  .data-table {
+    min-width: 760px;
+  }
+
+  .card.overflow-x-auto {
+    overflow-x: auto;
+  }
+
+  .tabs {
+    width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .tab {
+    white-space: nowrap;
+  }
+}
+
 @layer components {
   /* 后台 layout 内可滚动主体 */
   .admin-pane {
     @apply rounded-lg border border-border bg-surface-1 shadow-1;
+  }
+
+  /* ===========================================================
+     企业蓝 SAAS 紧凑式覆盖层 — 仅作用于管理后台
+     - 隐藏页头描述文字，节省纵向空间
+     - 页头标题降级 h4，与 PageShell 一致
+     - 表格内容更紧凑（减小行高 / 字号）
+     =========================================================== */
+  .page-subtitle {
+    display: none;
+  }
+  .page-header {
+    margin-bottom: var(--space-3);
+  }
+  .page-title {
+    font-size: var(--fs-h5);
+    font-weight: var(--weight-semibold);
+  }
+  /* 让 .card 在管理后台用稍小的圆角 */
+  .card {
+    border-radius: var(--radius-md);
+  }
+
+  /* ===========================================================
+     筛选 / 工具条统一规范：
+     - 子级 .input / .select / .textarea 默认 width:auto，按内容自适应；
+       这样在 flex-wrap 容器里多个控件能挤在一行
+     - 给定一个友好的最小宽度，避免 select 缩到看不清
+     - 用 :where() 把外层选择器特异性降为 0，让 Tailwind w-XX 类（utilities 层）能覆盖此默认值
+     =========================================================== */
+  :where(.filter-bar) > .input,
+  :where(.filter-bar) > .select,
+  :where(.filter-bar) > .textarea,
+  :where(.filter-bar) > .input-affix,
+  :where(.filter-bar) > .input-affix > .input {
+    width: auto;
+    min-width: 7rem;
+  }
+  /* select 因为有内置箭头需要稍宽点 */
+  :where(.filter-bar) > .select {
+    min-width: 8.5rem;
+    padding-right: 1.75rem;
+  }
+  /* 日期/数字输入框稍微宽点 */
+  :where(.filter-bar) > .input[type='date'],
+  :where(.filter-bar) > .input[type='datetime-local'] {
+    min-width: 9rem;
+  }
+
+  /* ===========================================================
+     企业蓝 SAAS 风格分页栏（PageShell.Pager 配套样式）
+     视觉要点：
+       - 顶边分隔线 + 极淡背景，与表格主体形成层次
+       - 数字按钮等宽 28×28、紧凑圆角
+       - 当前页：实心 klein 蓝、白字
+       - hover：背景态而非边框态，避免抖动
+       - 每页 select 隐藏原生外观，用 inset shadow 做下边线
+     =========================================================== */
+  .pager {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--border-default);
+    background: var(--surface-2);
+    font-size: var(--fs-tiny);
+    color: var(--text-tertiary);
+    flex-wrap: wrap;
+  }
+  .pager-info {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    line-height: 1;
+  }
+  .pager-info-sep {
+    margin-inline: 6px;
+    color: var(--border-strong);
+  }
+  .pager-controls {
+    display: inline-flex;
+    align-items: center;
+    gap: 16px;
+    margin-left: auto;
+  }
+  .pager-size {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-secondary);
+    user-select: none;
+  }
+  .pager-size-label {
+    color: var(--text-tertiary);
+    font-size: var(--fs-tiny);
+  }
+  .pager-size-select {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+  }
+  .pager-size-select::after {
+    content: '';
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    width: 6px;
+    height: 6px;
+    border-right: 1.5px solid var(--text-secondary);
+    border-bottom: 1.5px solid var(--text-secondary);
+    transform: translateY(-65%) rotate(45deg);
+    pointer-events: none;
+  }
+  .pager-size-select > select {
+    appearance: none;
+    -webkit-appearance: none;
+    height: 26px;
+    padding: 0 22px 0 10px;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    background: var(--surface-1);
+    color: var(--text-primary);
+    font-size: var(--fs-small);
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+    cursor: pointer;
+    transition: border-color var(--duration-base) var(--ease-out),
+                background var(--duration-base) var(--ease-out);
+  }
+  .pager-size-select > select:hover {
+    border-color: var(--border-strong);
+  }
+  .pager-size-select > select:focus {
+    outline: none;
+    border-color: var(--klein-600);
+  }
+
+  .pager-pages {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+  .pager-btn {
+    min-width: 28px;
+    height: 28px;
+    padding: 0 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: var(--fs-small);
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+    cursor: pointer;
+    transition: background var(--duration-base) var(--ease-out),
+                color var(--duration-base) var(--ease-out),
+                border-color var(--duration-base) var(--ease-out);
+  }
+  .pager-btn:hover:not(:disabled):not(.pager-btn-active) {
+    background: var(--surface-3);
+    color: var(--text-primary);
+  }
+  .pager-btn:disabled {
+    color: var(--text-disabled);
+    cursor: not-allowed;
+  }
+  .pager-btn-active {
+    background: var(--klein-600);
+    color: #fff;
+    border-color: var(--klein-600);
+    font-weight: var(--weight-semibold);
+    cursor: default;
+    box-shadow: var(--klein-glow-soft);
+  }
+  .pager-btn-active:hover {
+    background: var(--klein-700);
+    border-color: var(--klein-700);
+  }
+  .pager-btn-icon {
+    font-size: 16px;
+    padding: 0;
+    color: var(--text-tertiary);
+  }
+  .pager-gap {
+    min-width: 18px;
+    text-align: center;
+    color: var(--text-tertiary);
+    user-select: none;
+  }
+
+  @media (max-width: 640px) {
+    .pager {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+    }
+    .pager-controls {
+      justify-content: space-between;
+      margin-left: 0;
+      gap: 8px;
+    }
   }
 }

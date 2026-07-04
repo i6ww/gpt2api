@@ -17,9 +17,10 @@ server:
 
 mysql:
   dsn: ""                    # 由环境变量 KLEIN_DB_DSN 注入
-  max_open_conns: 100
-  max_idle_conns: 20
+  max_open_conns: 150        # 高并发：嵌入式 agent 可并行跑数百任务；任务多为上游轮询(不占连接)，150 足够且 4 进程×150 < mysql max_connections
+  max_idle_conns: 40
   conn_max_lifetime: 1h
+  conn_max_idle_time: 10m
   slow_threshold: 200ms
 
 redis:

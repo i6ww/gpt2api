@@ -72,7 +72,10 @@ func main() {
 
 	mux := asynq.NewServeMux()
 
-	// TODO Sprint 5+: 注册具体任务 handler
+	webhookSvc := service.NewWebhookService(deps.Cfg, deps.Redis, service.NewSystemConfigService(repo.NewSystemConfigRepo(deps.DB)))
+	defer webhookSvc.Close()
+
+	mux.HandleFunc(service.WebhookTaskNotify, webhookSvc.HandleAsynqTask)
 	mux.HandleFunc(TaskPoolHealth, func(ctx context.Context, t *asynq.Task) error {
 		logger.FromCtx(ctx).Info("pool health tick", zap.String("task", t.Type()))
 		return nil

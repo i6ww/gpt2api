@@ -106,6 +106,16 @@ var (
 	// 429xxx 限流
 	RateLimited      = &Error{Code: 429101, HTTP: 429, Msg: "操作过于频繁"}
 	GenRateLimited   = &Error{Code: 429301, HTTP: 429, Msg: "创作频次超限"}
+	// ProbeThrottled 节流：账号刷新/探测频率受限。
+	// 用于号池"扫描续期"命中节流闸口（避免频繁请求 OpenAI / Adobe / Grok 上游
+	// 加速封号）。HTTP 429，前端弹 toast 即可。
+	ProbeThrottled = &Error{Code: 429302, HTTP: 429, Msg: "刷新过于频繁，请稍后再试"}
+
+	// AccountInvalid 账号已失效（refresh_token 被撤销 / 401 / invalid_grant）。
+	// 用于号池"扫描续期"返回路径。HTTP 410 表示资源永久不可用，前端可提示"删除"。
+	AccountInvalid = &Error{Code: 410301, HTTP: 410, Msg: "账号已失效"}
+	// AccountMissingCred 账号缺少 access_token / refresh_token，无法刷新。
+	AccountMissingCred = &Error{Code: 422301, HTTP: 422, Msg: "账号缺少凭证，无法刷新"}
 
 	// 500xxx 系统错误
 	Internal     = &Error{Code: 500001, HTTP: 500, Msg: "系统繁忙"}

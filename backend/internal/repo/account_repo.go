@@ -33,17 +33,23 @@ import (
 // 暂时保留向 account 表写的旧实现；它们的调用方 AccountAdminService 会在
 // Phase 2 整体下线（前端 Token 管理菜单一同删除）。
 type AccountRepo struct {
-	db       *gorm.DB
-	poolGpt  *PoolGptRepo
-	poolGrok *PoolGrokRepo
+	db         *gorm.DB
+	poolGpt    *PoolGptRepo
+	poolGrok   *PoolGrokRepo
+	poolXai    *PoolXAIRepo
+	poolAdobe  *PoolAdobeRepo
+	poolGoogle *PoolGoogleRepo
 }
 
 // NewAccountRepo 构造。
 func NewAccountRepo(db *gorm.DB) *AccountRepo {
 	return &AccountRepo{
-		db:       db,
-		poolGpt:  NewPoolGptRepo(db),
-		poolGrok: NewPoolGrokRepo(db),
+		db:         db,
+		poolGpt:    NewPoolGptRepo(db),
+		poolGrok:   NewPoolGrokRepo(db),
+		poolXai:    NewPoolXAIRepo(db),
+		poolAdobe:  NewPoolAdobeRepo(db),
+		poolGoogle: NewPoolGoogleRepo(db),
 	}
 }
 
@@ -70,6 +76,15 @@ func (r *AccountRepo) GetByID(ctx context.Context, id uint64) (*model.Account, e
 		return p.ToAccount(), nil
 	}
 	if g, err := r.poolGrok.GetByID(ctx, id); err == nil && g != nil {
+		return g.ToAccount(), nil
+	}
+	if x, err := r.poolXai.GetByID(ctx, id); err == nil && x != nil {
+		return x.ToAccount(), nil
+	}
+	if ad, err := r.poolAdobe.GetByID(ctx, id); err == nil && ad != nil {
+		return ad.ToAccount(), nil
+	}
+	if g, err := r.poolGoogle.GetByID(ctx, id); err == nil && g != nil {
 		return g.ToAccount(), nil
 	}
 	var a model.Account
@@ -169,6 +184,12 @@ func (r *AccountRepo) UpdateForProvider(ctx context.Context, id uint64, provider
 		return r.poolGpt.Update(ctx, id, translated)
 	case model.ProviderGROK:
 		return r.poolGrok.Update(ctx, id, translated)
+	case model.ProviderXAI:
+		return r.poolXai.Update(ctx, id, translated)
+	case model.ProviderADOBE:
+		return r.poolAdobe.Update(ctx, id, translated)
+	case model.ProviderFLOWMUSIC:
+		return r.poolGoogle.Update(ctx, id, translated)
 	}
 	return errors.New("account.update: unsupported provider " + provider)
 }
@@ -285,6 +306,36 @@ func (r *AccountRepo) AvailableByProvider(ctx context.Context, provider string) 
 			out = append(out, p.ToAccount())
 		}
 		return out, nil
+	case model.ProviderXAI:
+		rows, err := r.poolXai.AvailableForGateway(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]*model.Account, 0, len(rows))
+		for _, p := range rows {
+			out = append(out, p.ToAccount())
+		}
+		return out, nil
+	case model.ProviderADOBE:
+		rows, err := r.poolAdobe.AvailableForGateway(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]*model.Account, 0, len(rows))
+		for _, p := range rows {
+			out = append(out, p.ToAccount())
+		}
+		return out, nil
+	case model.ProviderFLOWMUSIC:
+		rows, err := r.poolGoogle.AvailableForGateway(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]*model.Account, 0, len(rows))
+		for _, p := range rows {
+			out = append(out, p.ToAccount())
+		}
+		return out, nil
 	}
 	var items []*model.Account
 	now := time.Now().UTC()
@@ -307,6 +358,12 @@ func (r *AccountRepo) MarkUsed(ctx context.Context, id uint64, provider string) 
 		return r.poolGpt.MarkGatewayUsed(ctx, id)
 	case model.ProviderGROK:
 		return r.poolGrok.MarkGatewayUsed(ctx, id)
+	case model.ProviderXAI:
+		return r.poolXai.MarkGatewayUsed(ctx, id)
+	case model.ProviderADOBE:
+		return r.poolAdobe.MarkGatewayUsed(ctx, id)
+	case model.ProviderFLOWMUSIC:
+		return r.poolGoogle.MarkGatewayUsed(ctx, id)
 	}
 	now := time.Now().UTC()
 	return r.db.WithContext(ctx).Model(&model.Account{}).
@@ -327,6 +384,12 @@ func (r *AccountRepo) MarkFailed(ctx context.Context, id uint64, reason string, 
 		return r.poolGpt.MarkGatewayFailed(ctx, id, reason, cooldown)
 	case model.ProviderGROK:
 		return r.poolGrok.MarkGatewayFailed(ctx, id, reason, cooldown)
+	case model.ProviderXAI:
+		return r.poolXai.MarkGatewayFailed(ctx, id, reason, cooldown)
+	case model.ProviderADOBE:
+		return r.poolAdobe.MarkGatewayFailed(ctx, id, reason, cooldown)
+	case model.ProviderFLOWMUSIC:
+		return r.poolGoogle.MarkGatewayFailed(ctx, id, reason, cooldown)
 	}
 	now := time.Now().UTC()
 	fields := map[string]any{
@@ -343,6 +406,26 @@ func (r *AccountRepo) MarkFailed(ctx context.Context, id uint64, reason string, 
 	}
 	return r.db.WithContext(ctx).Model(&model.Account{}).
 		Where("id = ?", id).Updates(fields).Error
+}
+
+// MarkInvalidForProvider 把账号标记为「token 永久失效」终态。
+//
+// 与 MarkFailed 的区别：MarkFailed 进 cooldown，到期后会被自动续期拉回可用（适合
+// 限流 / 临时抖动）；MarkInvalidForProvider 是终态，不进自动续期复活循环，专门用于
+// "token 真的死了"（生成时干净的 401/403）——避免僵尸号反复入选。仍保留行记录，
+// 后台可查、可人工刷新恢复。
+//
+// 目前仅 ADOBE 走专用 invalid 态；其它 provider 退化为长冷却以保持既有行为不破坏。
+func (r *AccountRepo) MarkInvalidForProvider(ctx context.Context, id uint64, reason string, provider string) error {
+	switch provider {
+	case model.ProviderADOBE:
+		return r.poolAdobe.MarkGatewayInvalid(ctx, id, reason)
+	case model.ProviderFLOWMUSIC:
+		return r.poolGoogle.MarkGatewayInvalid(ctx, id, reason)
+	case model.ProviderXAI:
+		return r.poolXai.MarkGatewayInvalid(ctx, id, reason)
+	}
+	return r.MarkFailed(ctx, id, reason, 6*time.Hour, provider)
 }
 
 // translateAccountFieldsToPool 把 account 表语义的字段名/值翻成对应 pool_*
@@ -365,7 +448,7 @@ func translateAccountFieldsToPool(fields map[string]any, provider string) map[st
 		case "access_token_expires_at":
 			out["expires_at"] = v
 		case "status":
-			out["status"] = accountStatusInt8ToPool(v)
+			out["status"] = accountStatusInt8ToPool(v, provider)
 		case "oauth_meta":
 			// 仅 GPT 池有 plan_type / chatgpt_account_id；Grok 用 account_type
 			s, ok := v.(string)
@@ -388,6 +471,10 @@ func translateAccountFieldsToPool(fields map[string]any, provider string) map[st
 				if pt, ok := meta["plan_type"].(string); ok && pt != "" {
 					out["account_type"] = pt
 				}
+			case model.ProviderADOBE:
+				// pool_adobe 把 oauth_meta 整块原样存到 entitlements_json 字段，
+				// 供 generation_service 学习 not_entitled 档位 / 7 天后过期。
+				out["entitlements_json"] = s
 			}
 		default:
 			out[k] = v
@@ -397,7 +484,10 @@ func translateAccountFieldsToPool(fields map[string]any, provider string) map[st
 }
 
 // accountStatusInt8ToPool 把 account 表的 int8 状态码翻成 pool_* 字符串状态。
-func accountStatusInt8ToPool(v any) string {
+//
+// pool_gpt / pool_grok 用同一套常量字符串（GPTStatus*），pool_adobe 单独一套
+// （AdobeStatus*）。除 cooldown 外其余值在两套常量中字面相同。
+func accountStatusInt8ToPool(v any, provider string) string {
 	var i int8
 	switch n := v.(type) {
 	case int8:
@@ -409,7 +499,25 @@ func accountStatusInt8ToPool(v any) string {
 	case int64:
 		i = int8(n)
 	default:
+		if provider == model.ProviderADOBE || provider == model.ProviderFLOWMUSIC {
+			return model.AdobeStatusValid
+		}
 		return model.GPTStatusValid
+	}
+	if provider == model.ProviderADOBE || provider == model.ProviderFLOWMUSIC {
+		// pool_adobe / pool_google 共用同一套字符串状态常量。
+		switch i {
+		case model.AccountStatusEnabled:
+			return model.AdobeStatusValid
+		case model.AccountStatusDisabled:
+			return model.AdobeStatusDisabled
+		case model.AccountStatusBroken:
+			return model.AdobeStatusCooldown
+		case model.AccountStatusBanned:
+			return model.AdobeStatusInvalid
+		default:
+			return model.AdobeStatusValid
+		}
 	}
 	switch i {
 	case model.AccountStatusEnabled:

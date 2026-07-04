@@ -188,6 +188,16 @@ func (s *BillingService) GrantPoints(ctx context.Context, userID uint64, biz, bi
 	return nil
 }
 
+// IncomeForInvite 邀请返佣专用入账：和 GrantPoints 一样直接加点，但额外返回
+// wallet_log 引用，供 invite_reward_log.wallet_log_id 落地。
+func (s *BillingService) IncomeForInvite(ctx context.Context, userID uint64, biz, bizID string, points int64, remark string) (*model.WalletLog, error) {
+	log, err := s.wallet.Income(ctx, userID, biz, bizID, points, remark)
+	if err != nil {
+		return nil, errcode.DBError.Wrap(err)
+	}
+	return log, nil
+}
+
 // ListWalletLogs 用户钱包流水。
 func (s *BillingService) ListWalletLogs(ctx context.Context, userID uint64, page, pageSize int) ([]*model.WalletLog, int64, error) {
 	logs, total, err := s.wallet.ListUserLogs(ctx, userID, page, pageSize)

@@ -1,0 +1,63 @@
+# 边缘节点 nginx 模板（nginx:1.27 envsubst 自动渲染）
+# 文档：deploy/docs/AGENT_DEPLOY.md §4.3
+upstream klein_agent {
+    server agent:${KLEIN_AGENT_PORT};
+    keepalive 32;
+}
+
+map $http_origin $klein_allow_origin {
+    default                                "";
+    "~^${KLEIN_CONTROL_PUBLIC_ORIGIN}$"     $http_origin;
+}
+
+server {
+    listen ${KLEIN_EDGE_HTTP_PORT};
+    listen [::]:${KLEIN_EDGE_HTTP_PORT};
+    server_name ${KLEIN_NODE_HOST};
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+    add_header Access-Control-Allow-Origin  $klein_allow_origin always;
+    add_header Access-Control-Allow-Methods "GET, HEAD, OPTIONS" always;
+    add_header Vary "Origin" always;
+
+    client_max_body_size 1m;
+
+    location = /healthz {
+        proxy_pass http://klein_agent/healthz;
+        proxy_read_timeout 5s;
+    }
+
+    location = /readyz {
+        proxy_pass http://klein_agent/readyz;
+        proxy_read_timeout 5s;
+    }
+
+    # 公网下载入口：先走 agent 校验 ticket，再 X-Accel-Redirect 到 /_local/
+    location /d/ {
+        proxy_pass http://klein_agent;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_read_timeout 30s;
+    }
+
+    # X-Accel 内部位置（仅 agent 可触发）
+    location /_local/ {
+        internal;
+        alias /var/klein/storage/public/;
+        add_header Access-Control-Allow-Origin  $klein_allow_origin always;
+        add_header Cache-Control "public, max-age=86400" always;
+        sendfile on;
+        tcp_nopush on;
+        aio threads;
+    }
+
+    location / {
+        return 404 '{"error":"not_found"}';
+        default_type application/json;
+    }
+}

@@ -19,9 +19,13 @@ func NewPoolGrokRepo(db *gorm.DB) *PoolGrokRepo { return &PoolGrokRepo{db: db} }
 // PoolGrokFilter 列表过滤。
 type PoolGrokFilter struct {
 	TrialStatus string
-	Keyword     string
-	Page        int
-	PageSize    int
+	// AccountType 精确匹配 pool_grok.account_type。可选值同 dto.GrokPoolListReq.AccountType。
+	AccountType string
+	// SubscriptionStatus 精确匹配 pool_grok.subscription_status。
+	SubscriptionStatus string
+	Keyword            string
+	Page               int
+	PageSize           int
 }
 
 // List 分页列表。
@@ -35,6 +39,12 @@ func (r *PoolGrokRepo) List(ctx context.Context, f PoolGrokFilter) ([]*model.Poo
 	q := r.db.WithContext(ctx).Model(&model.PoolGrok{}).Where("deleted_at IS NULL")
 	if f.TrialStatus != "" {
 		q = q.Where("trial_status = ?", f.TrialStatus)
+	}
+	if f.AccountType != "" {
+		q = q.Where("account_type = ?", f.AccountType)
+	}
+	if f.SubscriptionStatus != "" {
+		q = q.Where("subscription_status = ?", f.SubscriptionStatus)
 	}
 	if f.Keyword != "" {
 		q = q.Where("email LIKE ?", "%"+f.Keyword+"%")
@@ -103,7 +113,7 @@ func (r *PoolGrokRepo) UpsertMany(ctx context.Context, items []*model.PoolGrok) 
 			"password_enc", "given_name", "family_name", "sso_enc", "sso_rw_enc",
 			"user_agent", "trial_status", "trial_expires_at",
 			"account_type", "credits",
-			"payment_url", "updated_at",
+			"payment_url", "deleted_at", "updated_at",
 		}),
 	}).Create(&items)
 	return tx.RowsAffected, tx.Error
@@ -118,20 +128,20 @@ func (r *PoolGrokRepo) Update(ctx context.Context, id uint64, fields map[string]
 		Where("id = ?", id).Updates(fields).Error
 }
 
-// SoftDelete 软删除。
+// SoftDelete deletes the account row permanently.
 func (r *PoolGrokRepo) SoftDelete(ctx context.Context, id uint64) error {
-	return r.db.WithContext(ctx).Model(&model.PoolGrok{}).
-		Where("id = ?", id).Update("deleted_at", time.Now().UTC()).Error
+	return r.db.WithContext(ctx).Unscoped().
+		Where("id = ?", id).Delete(&model.PoolGrok{}).Error
 }
 
-// SoftDeleteByIDs 批量软删除。
+// SoftDeleteByIDs permanently deletes account rows.
 func (r *PoolGrokRepo) SoftDeleteByIDs(ctx context.Context, ids []uint64) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	tx := r.db.WithContext(ctx).Model(&model.PoolGrok{}).
-		Where("id IN ? AND deleted_at IS NULL", ids).
-		Update("deleted_at", time.Now().UTC())
+	tx := r.db.WithContext(ctx).Unscoped().
+		Where("id IN ?", ids).
+		Delete(&model.PoolGrok{})
 	return tx.RowsAffected, tx.Error
 }
 
@@ -148,7 +158,7 @@ func (r *PoolGrokRepo) AvailableForGateway(ctx context.Context) ([]*model.PoolGr
 		Where("cooldown_until IS NULL OR cooldown_until <= ?", now).
 		Where("expires_at IS NULL OR expires_at > ?", now).
 		Where("LENGTH(sso_enc) > 0").
-		Order("id ASC").
+		Order("last_used_at IS NULL DESC, last_used_at ASC, id ASC").
 		Find(&items).Error
 	return items, err
 }
@@ -234,7 +244,7 @@ func (r *PoolGrokRepo) Purge(ctx context.Context, f PoolGrokPurgeFilter) (int64,
 			return 0, nil
 		}
 	}
-	tx := q.Update("deleted_at", time.Now().UTC())
+	tx := q.Unscoped().Delete(&model.PoolGrok{})
 	return tx.RowsAffected, tx.Error
 }
 
@@ -255,18 +265,42 @@ const (
 	GrokRefreshScopeUnknownType PoolGrokRefreshScope = "unknown_type"
 )
 
-// ListForRefresh 按 scope 列出需要探测的账号。
+// ListForRefresh 按 scope 列出需要探测的账号（首批，无分页）。
+//
+// 旧 API：用于 scheduler 等只关心首批 N 条的调用方。万级账号场景请用
+// ListForRefreshChunk 做 cursor 分页。
 //
 // 仅返回有 sso 的行（rate-limits API 只能用 sso）。
 //
 // limit <= 0 → 默认 500。
 func (r *PoolGrokRepo) ListForRefresh(ctx context.Context, scope PoolGrokRefreshScope, limit int) ([]*model.PoolGrok, error) {
+	return r.ListForRefreshChunk(ctx, scope, 0, limit)
+}
+
+// ListForRefreshChunk 按 scope + (id > afterID) cursor 分页扫描需要探测的账号。
+//
+// 返回结果按 id ASC 排序，长度 ≤ limit；调用方拿最后一条的 ID 作为下次 afterID，
+// 直到返回空 slice 表示扫完。
+//
+// 这是万级账号批量刷新的关键：避免一次 `SELECT ... LIMIT 10000` 把内存打穿，
+// 也避免 `OFFSET` 翻页在并发 update 时漏行/重复。
+//
+// afterID = 0 → 从头开始；limit <= 0 → 默认 200。
+func (r *PoolGrokRepo) ListForRefreshChunk(
+	ctx context.Context,
+	scope PoolGrokRefreshScope,
+	afterID uint64,
+	limit int,
+) ([]*model.PoolGrok, error) {
 	if limit <= 0 {
-		limit = 500
+		limit = 200
 	}
 	q := r.db.WithContext(ctx).
 		Where("deleted_at IS NULL").
 		Where("LENGTH(sso_enc) > 0")
+	if afterID > 0 {
+		q = q.Where("id > ?", afterID)
+	}
 
 	switch scope {
 	case GrokRefreshScopeAbnormal:

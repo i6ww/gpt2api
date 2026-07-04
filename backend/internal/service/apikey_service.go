@@ -30,7 +30,7 @@ const KeyPrefix = "sk-klein-"
 func (s *APIKeyService) Create(ctx context.Context, userID uint64, req *dto.APIKeyCreateReq) (*dto.APIKeyCreateResp, error) {
 	scope := strings.TrimSpace(req.Scope)
 	if scope == "" {
-		scope = "chat,image,video"
+		scope = "chat,image,video,music"
 	}
 
 	body, err := crypto.RandomString(40)
@@ -105,6 +105,58 @@ func (s *APIKeyService) List(ctx context.Context, userID uint64) ([]*dto.APIKeyR
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+// Stats 聚合用户在指定时间窗口里每个 Key 的调用次数 / 消费点数。
+//
+// 入参 since / until 为 unix 秒；0 / 负值表示该端不限。响应里 Total 是所有 Key 的合计，
+// PerKey 是按 KeyID 升序排列的明细。前端表格通过 KeyID join 已知的 Key 列表展示。
+func (s *APIKeyService) Stats(ctx context.Context, userID uint64, req *dto.APIKeyStatsReq) (*dto.APIKeyStatsResp, error) {
+	var since, until time.Time
+	if req != nil && req.Since > 0 {
+		since = time.Unix(req.Since, 0).UTC()
+	}
+	if req != nil && req.Until > 0 {
+		until = time.Unix(req.Until, 0).UTC()
+	}
+	rows, err := s.repo.Stats(ctx, userID, since, until)
+	if err != nil {
+		return nil, errcode.DBError.Wrap(err)
+	}
+	resp := &dto.APIKeyStatsResp{
+		PerKey: make([]dto.APIKeyStat, 0, len(rows)),
+	}
+	if !since.IsZero() {
+		resp.Since = since.Unix()
+	}
+	if !until.IsZero() {
+		resp.Until = until.Unix()
+	}
+	for _, r := range rows {
+		stat := dto.APIKeyStat{
+			KeyID:          r.KeyID,
+			CallTotal:      r.CallTotal,
+			CallSucceeded:  r.CallSucceeded,
+			CallFailed:     r.CallFailed,
+			ConsumedPoints: r.ConsumedPoints,
+			RefundedPoints: r.RefundedPoints,
+		}
+		if r.LastCalledAt != nil {
+			stat.LastCalledAt = r.LastCalledAt.Unix()
+		}
+		resp.PerKey = append(resp.PerKey, stat)
+		resp.Total.CallTotal += r.CallTotal
+		resp.Total.CallSucceeded += r.CallSucceeded
+		resp.Total.CallFailed += r.CallFailed
+		resp.Total.ConsumedPoints += r.ConsumedPoints
+		resp.Total.RefundedPoints += r.RefundedPoints
+		if r.LastCalledAt != nil {
+			if ts := r.LastCalledAt.Unix(); ts > resp.Total.LastCalledAt {
+				resp.Total.LastCalledAt = ts
+			}
+		}
+	}
+	return resp, nil
 }
 
 // Toggle 启用 / 停用。

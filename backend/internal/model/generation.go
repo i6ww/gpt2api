@@ -28,9 +28,16 @@ type GenerationTask struct {
 	CostPoints   int64      `gorm:"column:cost_points;not null" json:"cost_points"`
 	IdemKey      string     `gorm:"column:idem_key;size:64;not null;uniqueIndex:uk_user_idem,priority:2" json:"idem_key"`
 	AccountID    *uint64    `gorm:"column:account_id" json:"account_id,omitempty"`
+	ClaimNodeID  *string    `gorm:"column:claim_node_id;size:40" json:"claim_node_id,omitempty"`
+	ClaimLeaseAt *time.Time `gorm:"column:claim_lease_until" json:"claim_lease_until,omitempty"`
 	Provider     string     `gorm:"column:provider;size:32;not null" json:"provider"`
 	Status       int8       `gorm:"column:status;not null;default:0;index:idx_user_kind_status,priority:3;index:idx_status_created,priority:1" json:"status"`
 	Progress     int8       `gorm:"column:progress;not null;default:0" json:"progress"`
+	PollRetryAfter int8     `gorm:"column:poll_retry_after;not null;default:0" json:"poll_retry_after"`
+	// Attempt 集群 lease 累计次数：embedded / 远端 agent 每抢一次锁 +=1。
+	// 远端 agent 上报 retryable 错误时配合 cluster_dispatch.ApplyAgentResult
+	// 决定是否还放回队列重试；超过 cfg.retry_max_attempts 才真正 SetFailed。
+	Attempt      int8       `gorm:"column:attempt;not null;default:0" json:"attempt"`
 	Error        *string    `gorm:"column:error;size:255" json:"error,omitempty"`
 	StartedAt    *time.Time `gorm:"column:started_at" json:"started_at,omitempty"`
 	FinishedAt   *time.Time `gorm:"column:finished_at" json:"finished_at,omitempty"`

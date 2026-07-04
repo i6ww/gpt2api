@@ -28,12 +28,13 @@ import (
 
 // Deps 启动后向业务层注入的依赖集合。
 type Deps struct {
-	Cfg     *config.Config
-	DB      *gorm.DB
-	Redis   *redis.Client
-	JWT     *jwtx.Manager
-	Limiter *ratelimit.Limiter
-	AES     *crypto.AESGCM
+	Cfg              *config.Config
+	DB               *gorm.DB
+	Redis            *redis.Client
+	JWT              *jwtx.Manager
+	Limiter          *ratelimit.Limiter
+	AES              *crypto.AESGCM
+	ClusterBootstrap []byte // 解码后的 cluster bootstrap 根密钥；空表示集群禁用
 }
 
 // Init 完整初始化（config / logger / mysql / redis / jwt / aes / snowflake）。
@@ -66,9 +67,11 @@ func Init(serviceName string) (*Deps, error) {
 		return nil, fmt.Errorf("init aes: %w", err)
 	}
 
-	db, err := database.NewMySQL(&cfg.MySQL)
+	// 启动时 mysql / redis 可能因为同一台 host 同时启动还没就绪（dev-full
+	// compose 经常出现：admin 比 mysql / redis 先就绪 → 一次失败立刻进 degraded mode，
+	// 路由只剩 /ping，全 API 都 404）。这里加 60s 内的退避重试，把瞬时不可用磨平。
+	db, err := connectMySQLWithRetry(cfg)
 	if err != nil {
-		// dev 下允许暂时跑空依赖（仅 healthz 可用），但日志告警
 		if cfg.IsDev() {
 			logger.L().Warn("mysql unavailable, running in degraded mode", zap.Error(err))
 			db = nil
@@ -77,7 +80,7 @@ func Init(serviceName string) (*Deps, error) {
 		}
 	}
 
-	rdb, err := database.NewRedis(&cfg.Redis)
+	rdb, err := connectRedisWithRetry(cfg)
 	if err != nil {
 		if cfg.IsDev() {
 			logger.L().Warn("redis unavailable, running in degraded mode", zap.Error(err))
@@ -92,14 +95,92 @@ func Init(serviceName string) (*Deps, error) {
 		limiter = ratelimit.New(rdb)
 	}
 
+	clusterBootstrap, err := decodeClusterBootstrap(cfg.Cluster.BootstrapSecret)
+	if err != nil {
+		// dev 容忍：cluster 关闭即可
+		if cfg.IsDev() {
+			logger.L().Warn("KLEIN_CLUSTER_BOOTSTRAP_SECRET invalid; cluster disabled", zap.Error(err))
+			clusterBootstrap = nil
+		} else {
+			return nil, fmt.Errorf("cluster bootstrap secret: %w", err)
+		}
+	}
+
 	return &Deps{
-		Cfg:     cfg,
-		DB:      db,
-		Redis:   rdb,
-		JWT:     jwtMgr,
-		Limiter: limiter,
-		AES:     aes,
+		Cfg:              cfg,
+		DB:               db,
+		Redis:            rdb,
+		JWT:              jwtMgr,
+		Limiter:          limiter,
+		AES:              aes,
+		ClusterBootstrap: clusterBootstrap,
 	}, nil
+}
+
+// decodeClusterBootstrap 接受 hex(64) 或 32 字节明文。
+func decodeClusterBootstrap(raw string) ([]byte, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	if b, err := hex.DecodeString(raw); err == nil && len(b) >= 16 {
+		return b, nil
+	}
+	if len(raw) >= 16 {
+		return []byte(raw), nil
+	}
+	return nil, errors.New("must be hex(>=32 chars) or raw(>=16 bytes)")
+}
+
+// 启动连接 MySQL / Redis 的退避重试参数。挑 60s 是因为 docker compose
+// 上 mysql 冷启动到 healthy 一般 10-20s，redis 加载 AOF 也很少超过 30s，
+// 留一倍 buffer。重试间隔从 500ms 起逐步加到 4s，避免风暴。
+const (
+	depRetryMax      = 60 * time.Second
+	depRetryMinSleep = 500 * time.Millisecond
+	depRetryMaxSleep = 4 * time.Second
+)
+
+func connectMySQLWithRetry(cfg *config.Config) (*gorm.DB, error) {
+	return retryDial[*gorm.DB]("mysql", func() (*gorm.DB, error) {
+		return database.NewMySQL(&cfg.MySQL)
+	})
+}
+
+func connectRedisWithRetry(cfg *config.Config) (*redis.Client, error) {
+	return retryDial[*redis.Client]("redis", func() (*redis.Client, error) {
+		return database.NewRedis(&cfg.Redis)
+	})
+}
+
+func retryDial[T any](name string, dial func() (T, error)) (T, error) {
+	deadline := time.Now().Add(depRetryMax)
+	sleep := depRetryMinSleep
+	for attempt := 1; ; attempt++ {
+		val, err := dial()
+		if err == nil {
+			if attempt > 1 {
+				logger.L().Info(name+" connected after retry", zap.Int("attempts", attempt))
+			}
+			return val, nil
+		}
+		if time.Now().After(deadline) {
+			var zero T
+			return zero, fmt.Errorf("%s connect timeout after %s: %w", name, depRetryMax, err)
+		}
+		// 只在 attempt=1 和每 5 次打一条日志，避免刷屏。
+		if attempt == 1 || attempt%5 == 0 {
+			logger.L().Warn(name+" connect failed, retrying",
+				zap.Int("attempt", attempt), zap.Duration("sleep", sleep), zap.Error(err))
+		}
+		time.Sleep(sleep)
+		if sleep < depRetryMaxSleep {
+			sleep *= 2
+			if sleep > depRetryMaxSleep {
+				sleep = depRetryMaxSleep
+			}
+		}
+	}
 }
 
 func initAES(raw string) (*crypto.AESGCM, error) {
