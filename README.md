@@ -1,5 +1,7 @@
 # gpt2api / KleinAI
 
+> **最新版本：`v3.0.1`（多平台多通道聚合，全面更新）** —— 详见 [CHANGELOG](CHANGELOG.md)
+
 > 一个面向多平台账号池 + 第三方上游 API 的 AIGC 聚合平台，提供图片、文字、视频、音乐的一站式生成能力。  
 > 前台面向创作，后台面向运营，开放 OpenAI / Gemini 兼容接口，方便直接接入现有 SDK。
 
@@ -187,6 +189,7 @@ docker compose -f docker-compose.dev-full.yml up -d --build
 
 ## 文档
 
+- [更新日志 CHANGELOG](CHANGELOG.md)
 - [开发规范](docs/01-开发规范-总览.md)
 - [后端规范](docs/02-后端规范.md)
 - [数据库设计](docs/03-数据库设计.md)
